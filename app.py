@@ -1,3 +1,5 @@
+#app.py
+
 import streamlit as st
 import tempfile
 import os
@@ -23,6 +25,7 @@ from services.llm_service import analyze_exam, segment_submission, QuestionLite
 from database.db_manager import db
 from database.models import Exam, Submission, Question, SubmissionItem
 from services.grading_service import grade_submission, build_final_report
+from services.solution_service import create_and_save_solution, get_solution_by_question
 
 # ---------- App config
 st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout=LAYOUT)
@@ -102,16 +105,17 @@ with st.sidebar:
 
     step_labels = {
         1: "1️⃣ Upload & OCR đề",
-        2: "2️⃣ Phân tích đề",
-        3: "3️⃣ Upload bài làm",
-        4: "4️⃣ Chấm bài",
-        5: "5️⃣ Xuất báo cáo",
+        2: "2️⃣ Phân tích đề", 
+        3: "3️⃣ Tạo lời giải",
+        4: "4️⃣ Upload bài làm",
+        5: "5️⃣ Chấm bài",
+        6: "6️⃣ Xuất báo cáo",
     }
 
     desired_step = st.selectbox(
         "🔀 Đi tới bước",
-        options=[1, 2, 3, 4, 5],
-        index=max(0, min(ss.current_step, 5) - 1),
+        options=[1, 2, 3, 4, 5, 6],
+        index=max(0, min(ss.current_step, 6) - 1),
         format_func=lambda x: step_labels[x],
         key="jump_step_select",
     )
@@ -151,8 +155,8 @@ with st.sidebar:
         if desired_step >= 2 and not (ss.exam_id or pending_exam_id):
             st.warning("🔔 Cần chọn Exam trước (trong 'Chọn dữ liệu từ DB').")
             ok = False
-        # Với step >=4 phải có submission (đang có sẵn hoặc pending)
-        if desired_step >= 4 and not (ss.submission_id or pending_submission_id):
+        # Với step >=5 phải có submission (đang có sẵn hoặc pending)  
+        if desired_step >= 5 and not (ss.submission_id or pending_submission_id):
             st.warning("🔔 Cần chọn Submission cho Exam đã chọn.")
             ok = False
 
@@ -295,7 +299,7 @@ elif ss.current_step == 2 and ss.exam_id:
                 ss.questions_from_db = db.get_questions_by_exam(ss.exam_id)
 
         with bN:
-            if st.button("➡️ Tiếp tục Bước 3", use_container_width=True):
+            if st.button("➡️ Tiếp tục Bước 3 (Tạo lời giải)", use_container_width=True):
                 ss.current_step = 3
                 st.rerun()
 
@@ -315,9 +319,110 @@ elif ss.current_step == 2 and ss.exam_id:
             st.markdown("**Danh sách câu hỏi (DB):**")
             st.dataframe(df_db, use_container_width=True, height=DF_HEIGHT)
 
-# ====================== STEP 3 ======================
+# ====================== STEP 3 (NEW): TẠO LỜI GIẢI ======================
 elif ss.current_step == 3 and ss.exam_id:
-    st.header("Bước 3: Upload và OCR bài làm học sinh")
+    st.header("Bước 3: Tạo lời giải và barem chấm điểm")
+    st.info(f"📌 Exam ID: {ss.exam_id}")
+
+    questions = db.get_questions_by_exam(ss.exam_id)
+    
+    if questions:
+        st.subheader("🧠 Tạo lời giải tự động")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("**Danh sách câu hỏi:**")
+            question_options = [f"Câu {q.order_index}{q.part_label if q.part_label else ''}: {q.question_text[:50]}..." for q in questions]
+            selected_idx = st.selectbox("Chọn câu hỏi để tạo lời giải:", range(len(questions)), format_func=lambda x: question_options[x])
+            
+            selected_question = questions[selected_idx]
+            
+            if st.button(f"🚀 Tạo lời giải cho câu {selected_question.order_index}{selected_question.part_label or ''}", use_container_width=True):
+                with st.spinner("Đang tạo lời giải..."):
+                    try:
+                        solution_id = create_and_save_solution(selected_question.id)
+                        st.success(f"✅ Đã tạo lời giải (ID: {solution_id})")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Lỗi khi tạo lời giải: {str(e)}")
+        
+        with col2:
+            existing_solution = get_solution_by_question(selected_question.id)
+            if existing_solution:
+                st.markdown(f"**Lời giải câu {existing_solution['order_index']}{existing_solution['part_label'] or ''}:**")
+                
+                with st.expander("📝 Hướng logic giải", expanded=True):
+                    display_math_text(existing_solution["solution_text"])
+                
+                with st.expander("🎯 Đáp án cuối"):
+                    display_math_text(existing_solution["final_answer"])
+                    
+                with st.expander("📋 Barem chấm điểm"):
+                    display_math_text(existing_solution["reasoning_approach"])
+                    
+                st.caption(f"Tạo lúc: {existing_solution['created_at']}")
+            else:
+                st.info("Chưa có lời giải cho câu hỏi này.")
+        
+        st.divider()
+        
+        # Tạo lời giải cho tất cả câu hỏi
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            if st.button("🔥 Tạo lời giải cho TẤT CẢ câu hỏi", use_container_width=True):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for i, q in enumerate(questions):
+                    status_text.text(f"Đang xử lý câu {q.order_index}{q.part_label or ''}...")
+                    try:
+                        create_and_save_solution(q.id)
+                        progress_bar.progress((i + 1) / len(questions))
+                    except Exception as e:
+                        st.warning(f"Lỗi câu {q.order_index}{q.part_label or ''}: {str(e)}")
+                
+                status_text.text("✅ Hoàn thành!")
+                st.success(f"Đã tạo lời giải cho {len(questions)} câu hỏi.")
+        
+        with col_b:
+            if st.button("➡️ Tiếp tục Bước 4 (Upload bài làm)", use_container_width=True):
+                ss.current_step = 4
+                st.rerun()
+        
+        st.divider()
+        st.subheader("📊 Tổng quan lời giải đã tạo")
+        
+        # Hiển thị bảng tổng quan các solutions
+        solutions_data = []
+        for q in questions:
+            sol = get_solution_by_question(q.id)
+            if sol:
+                solutions_data.append({
+                    "Câu": f"{sol['order_index']}{sol['part_label'] or ''}",
+                    "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
+                    "Có lời giải": "✅",
+                    "Độ khó": q.difficulty,
+                    "Tạo lúc": sol['created_at'].strftime("%H:%M %d/%m") if hasattr(sol['created_at'], 'strftime') else str(sol['created_at'])
+                })
+            else:
+                solutions_data.append({
+                    "Câu": f"{q.order_index}{q.part_label if q.part_label else ''}",
+                    "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
+                    "Có lời giải": "❌",
+                    "Độ khó": q.difficulty,
+                    "Tạo lúc": "-"
+                })
+        
+        if solutions_data:
+            df_solutions = pd.DataFrame(solutions_data)
+            st.dataframe(df_solutions, use_container_width=True, height=300)
+    else:
+        st.warning("Không có câu hỏi nào. Vui lòng quay lại Bước 2 để phân tích đề.")
+
+# ====================== STEP 4 (OLD STEP 3): UPLOAD BÀI LÀM ======================
+elif ss.current_step == 4 and ss.exam_id:
+    st.header("Bước 4: Upload và OCR bài làm học sinh")
     st.info(f"📌 Đề • ID: {ss.exam_id}")
 
     upl, act = st.columns([1, 1])
@@ -440,16 +545,16 @@ elif ss.current_step == 3 and ss.exam_id:
     # Nút chuyển bước 4
     if ss.submission_id:
         st.divider()
-        if st.button("➡️ Tiếp tục Bước 4 (Chấm bài)", type="primary", use_container_width=True):
-            ss.current_step = 4
+        if st.button("➡️ Tiếp tục Bước 5 (Chấm bài)", type="primary", use_container_width=True):
+            ss.current_step = 5
             st.rerun()
 
-# ====================== STEP 4 ======================
-elif ss.current_step == 4 and ss.exam_id:
-    st.header("Bước 4: Chấm bài")
+# ====================== STEP 5 (OLD STEP 4): CHẤM BÀI ======================
+elif ss.current_step == 5 and ss.exam_id:
+    st.header("Bước 5: Chấm bài")
     st.info(f"📌 Exam ID: {ss.exam_id}")
 
-    # Nếu user nhảy thẳng vào Bước 4 mà chưa có submission_id → cho chọn
+    # Nếu user nhảy thẳng vào Bước 5 mà chưa có submission_id → cho chọn
     if not ss.submission_id:
         st.warning("Bạn chưa chọn Submission. Hãy chọn bên Sidebar, hoặc ngay tại đây.")
         subs_inline = list_submissions(ss.exam_id)
@@ -466,16 +571,43 @@ elif ss.current_step == 4 and ss.exam_id:
 
     colA, colB = st.columns([1, 1])
     with colA:
-        if st.button("🧮 Chấm toàn bộ bài", use_container_width=True):
-            results = grade_submission(int(ss.submission_id))
+        if st.button("🧮 Chấm toàn bộ bài (So sánh với lời giải chuẩn)", use_container_width=True):
+            with st.spinner("Đang chấm bài với AI..."):
+                results = grade_submission(int(ss.submission_id))
             if results:
-                df = pd.DataFrame([{
-                    "order_index": r.order_index,
-                    "part_label": r.part_label,
-                    "nhan_xet": r.nhan_xet,
-                    "kien_thuc_hong": ", ".join(r.kien_thuc_hong),
-                } for r in results])
-                st.dataframe(df, use_container_width=True, height=DF_HEIGHT)
+                st.subheader("📊 Kết quả chấm chi tiết")
+                
+                # Tổng quan kết quả
+                correct_count = sum(1 for r in results if r.is_correct)
+                total_count = len(results)
+                st.metric("Tổng quan", f"{correct_count}/{total_count} câu đúng", 
+                         f"{correct_count/total_count*100:.1f}%" if total_count > 0 else "0%")
+                
+                # Hiển thị từng câu
+                for r in results:
+                    status_icon = "✅" if r.is_correct else "❌"
+                    with st.expander(f"{status_icon} Câu {r.order_index}{r.part_label} - {'ĐÚNG' if r.is_correct else 'SAI'}"):
+                        
+                        col1, col2 = st.columns([1, 1])
+                        
+                        with col1:
+                            st.markdown("**🧠 Lỗ hổng kiến thức:**")
+                            if r.knowledge_gaps:
+                                for gap in r.knowledge_gaps:
+                                    st.write(f"• {gap}")
+                            else:
+                                st.write("✅ Không có lỗ hổng kiến thức")
+                        
+                        with col2:
+                            st.markdown("**⚠️ Lỗi tính toán & logic:**")
+                            if r.calculation_logic_errors:
+                                for error in r.calculation_logic_errors:
+                                    st.write(f"• {error}")
+                            else:
+                                st.write("✅ Không có lỗi tính toán/logic")
+                        
+                        st.markdown("**💬 Nhận xét tổng quan:**")
+                        st.markdown(r.llm_feedback)
             else:
                 st.info("Không có mục nào để chấm hoặc submission_id không hợp lệ.")
 
@@ -493,10 +625,10 @@ elif ss.current_step == 4 and ss.exam_id:
             else:
                 st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
 
-# ====================== STEP 5 (optional placeholder) ======================
-elif ss.current_step == 5 and ss.exam_id:
-    st.header("Bước 5: Xuất báo cáo")
-    st.info("Bạn có thể tạo báo cáo ở Bước 4 (nút 'Tạo bản chấm tổng hợp').")
+# ====================== STEP 6 (OLD STEP 5): XUẤT BÁO CÁO ======================
+elif ss.current_step == 6 and ss.exam_id:
+    st.header("Bước 6: Xuất báo cáo")
+    st.info("Bạn có thể tạo báo cáo ở Bước 5 (nút 'Tạo bản chấm tổng hợp').")
     st.warning("(Placeholder) Tuỳ ý mở rộng thêm các định dạng export khác: PDF/Docx,...")
 
 st.divider()

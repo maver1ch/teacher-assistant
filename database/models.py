@@ -28,6 +28,7 @@ class Question(Base):
     exam = relationship("Exam", back_populates="questions")
     gradings = relationship("Grading", back_populates="question", cascade="all, delete-orphan")
     submission_items = relationship("SubmissionItem", back_populates="question", cascade="all, delete-orphan")
+    solution = relationship("QuestionSolution", back_populates="question", uselist=False, cascade="all, delete-orphan")
     
 class Submission(Base):
     __tablename__ = "submissions"
@@ -54,14 +55,35 @@ class SubmissionItem(Base):
     submission = relationship("Submission", back_populates="items")
     question = relationship("Question", back_populates="submission_items")
 
+class QuestionSolution(Base):
+    __tablename__ = "question_solutions"
+    id = Column(Integer, primary_key=True)
+    question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
+    order_index = Column(Integer, nullable=False)
+    part_label = Column(String(32))
+    solution_text = Column(Text, nullable=False)
+    final_answer = Column(Text)
+    reasoning_approach = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    question = relationship("Question", back_populates="solution")
+
 class Grading(Base):
     __tablename__ = "gradings"
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
-    feedback_text = Column(Text)
-    knowledge_gaps = Column(Text) 
-    final_score = Column(Float)
+    
+    # 3 yếu tố phân tích mới
+    knowledge_gaps = Column(Text)           # Lỗ hổng kiến thức (JSON array)
+    calculation_logic_errors = Column(Text) # Lỗi tính toán/logic (JSON array)  
+    llm_feedback = Column(Text)             # Nhận xét của LLM
+    
+    # Đánh giá kết quả
+    is_correct = Column(Integer, default=0) # 0=False, 1=True - đúng/sai
+    final_score = Column(Float)             # Điểm số (nếu cần)
+    
+    created_at = Column(DateTime, default=datetime.now)
 
     submission = relationship("Submission", back_populates="gradings")
     question = relationship("Question", back_populates="gradings")

@@ -6,14 +6,13 @@ import logging
 from typing import List
 from pathlib import Path
 
-# Why: latest Google GenAI SDK supports system_instruction; keep config centralized
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from dotenv import load_dotenv
+import base64
 load_dotenv()
 # -------------------- Constants (single source of truth)
-GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
-GEMINI_OCR_MODEL = "gemini-1.5-pro"   # switch to *-flash nếu muốn tốc độ
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+OCR_MODEL = "gpt-4.1-mini-2025-04-14"
 TEMPERATURE = 0.0
 
 # Heuristics for math wrapping
@@ -56,8 +55,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # -------------------- Helpers
-def _guess_mime(path: str) -> str:
-    # Why: minimal mime detection without extra deps
+def _encode_image(image_path: str) -> str:
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+def _get_image_mime_type(path: str) -> str:
     ext = Path(path).suffix.lower()
     if ext in (".jpg", ".jpeg"):
         return "image/jpeg"
@@ -65,7 +67,7 @@ def _guess_mime(path: str) -> str:
         return "image/png"
     if ext == ".webp":
         return "image/webp"
-    return "application/octet-stream"
+    return "image/jpeg"
 
 def _looks_like_formula(line: str) -> bool:
     # Why: lightweight rule to decide display-math wrapping
@@ -97,28 +99,49 @@ def _ensure_latex_delimiters(text: str) -> str:
 # -------------------- Service
 class OCRService:
     def __init__(self) -> None:
-        api_key = os.getenv(GEMINI_API_KEY_ENV)
-        self._client = genai.Client(api_key=api_key)
-
-    def _gen_config(self) -> types.GenerateContentConfig:
-        # Why: keep system_instruction & temperature consistent
-        return types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT_OCR,
-            temperature=TEMPERATURE,
-        )
+        api_key = os.getenv(OPENAI_API_KEY_ENV)
+        try:
+            self._client = OpenAI(api_key=api_key)
+        except TypeError as e:
+            # Handle proxy-related initialization issues
+            logger.warning(f"OpenAI client initialization with basic params: {str(e)}")
+            self._client = OpenAI(api_key=api_key)
 
     def _ocr_single_image_with_msg(self, image_path: str, user_msg: str) -> str:
-        mime = _guess_mime(image_path)
-        with open(image_path, "rb") as f:
-            img_part = types.Part.from_bytes(mime_type=mime, data=f.read())  # kw-only args
-
-        resp = self._client.models.generate_content(
-            model=GEMINI_OCR_MODEL,
-            contents=[user_msg, img_part],
-            config=self._gen_config(),
-        )
-        text = (resp.text or "").strip()
-        return _ensure_latex_delimiters(text) if text else ""
+        base64_image = _encode_image(image_path)
+        mime_type = _get_image_mime_type(image_path)
+        
+        try:
+            response = self._client.chat.completions.create(
+                model=OCR_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT_OCR
+                    },
+                    {
+                        "role": "user", 
+                        "content": [
+                            {"type": "text", "text": user_msg},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                temperature=TEMPERATURE,
+                max_tokens=4000
+            )
+            
+            text = response.choices[0].message.content.strip()
+            return _ensure_latex_delimiters(text) if text else ""
+            
+        except Exception as e:
+            logger.error(f"OCR failed for {image_path}: {str(e)}")
+            return ""
 
     # --- OCR cho đề thi (giữ nguyên)
     def ocr_single_image(self, image_path: str) -> str:

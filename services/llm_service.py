@@ -1,26 +1,26 @@
+#llm_service.py
+
 from __future__ import annotations
 
 import os
 import json
+import logging
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 # ---------- Constants
-API_KEY_ENV = "GEMINI_API_KEY"
-MODEL_NAME = "gemini-2.5-pro"     # giữ nguyên nếu bạn đã cố định model
-TEMPERATURE = 0.2
-RESP_MIME = "application/json"
-
-# Thinking budgets
-THINK_ANALYZE = 4096
-THINK_SEGMENT = 2048
+API_KEY_ENV = "OPENAI_API_KEY"
+MODEL_NAME = "o4-mini-2025-04-16"
+TEMPERATURE = 0.1
 
 load_dotenv()
-_client = genai.Client(api_key=os.getenv(API_KEY_ENV))
+_client = OpenAI(api_key=os.getenv(API_KEY_ENV))
 
 # ---------- Fixed System Prompt (adapted from user's instruction)
 SYSTEM_PROMPT_ANALYZE = """
@@ -115,113 +115,138 @@ class QuestionLite:
     text_short: str
     keywords: List[str]
 
-# ---------- Schemas
-def _schema_analyze() -> Any:
-    return types.Schema(
-        type=types.Type.ARRAY,
-        items=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "text": types.Schema(type=types.Type.STRING),
-                "difficulty": types.Schema(type=types.Type.INTEGER),
-                "order_index": types.Schema(type=types.Type.INTEGER),
-                "part_label": types.Schema(type=types.Type.STRING),
-                "knowledge_topics": types.Schema(
-                    type=types.Type.ARRAY,
-                    items=types.Schema(type=types.Type.STRING),
-                ),
-            },
-            required=["text", "difficulty", "order_index", "part_label", "knowledge_topics"],
-            property_ordering=["order_index", "part_label", "text", "difficulty", "knowledge_topics"],
-        ),
-    )
+# ---------- JSON Schemas for OpenAI
+ANALYZE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "difficulty": {"type": "integer"},
+                    "order_index": {"type": "integer"},
+                    "part_label": {"type": "string"},
+                    "knowledge_topics": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["text", "difficulty", "order_index", "part_label", "knowledge_topics"]
+            }
+        }
+    },
+    "required": ["questions"]
+}
 
-def _schema_segment() -> Any:
-    return types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "items": types.Schema(
-                type=types.Type.ARRAY,
-                items=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "question_id": types.Schema(type=types.Type.INTEGER),
-                        "order_index": types.Schema(type=types.Type.INTEGER),
-                        "part_label": types.Schema(type=types.Type.STRING),
-                        "position": types.Schema(type=types.Type.INTEGER),
-                        "answer_text": types.Schema(type=types.Type.STRING),
-                    },
-                    required=["question_id", "order_index", "part_label", "position", "answer_text"],
-                ),
-            )
-        },
-        required=["items"],
-    )
-
-# ---------- Thinking config (tùy SDK)
-def _thinking_config(budget_tokens: int):
-    # Why: SDK có thể chưa hỗ trợ ThinkingConfig ở mọi phiên bản; tránh crash.
-    try:
-        ThinkingConfig = getattr(types, "ThinkingConfig", None)
-        if ThinkingConfig is None:
-            return None
-        return ThinkingConfig(budget_tokens=budget_tokens)
-    except Exception:
-        return None
+SEGMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question_id": {"type": "integer"},
+                    "order_index": {"type": "integer"},
+                    "part_label": {"type": "string"},
+                    "position": {"type": "integer"},
+                    "answer_text": {"type": "string"}
+                },
+                "required": ["question_id", "order_index", "part_label", "position", "answer_text"]
+            }
+        }
+    },
+    "required": ["items"]
+}
 
 # ---------- Public APIs
 def analyze_exam(exam_text: str) -> List[Dict[str, Any]]:
-    cfg_kwargs = dict(
-        system_instruction=SYSTEM_PROMPT_ANALYZE,
-        temperature=TEMPERATURE,
-        response_mime_type=RESP_MIME,
-        response_schema=_schema_analyze(),
-    )
-    tk = _thinking_config(THINK_ANALYZE)
-    if tk is not None:
-        cfg_kwargs["thinking"] = tk
-
-    cfg = types.GenerateContentConfig(**cfg_kwargs)
-
+    logger.info(f"=== ANALYZE EXAM START ===")
+    logger.info(f"Input text length: {len(exam_text)} chars")
+    logger.info(f"Input text preview: {exam_text[:200]}...")
+    
     prompt = (
         "Phân tích văn bản đề thi sau và TRẢ VỀ DUY NHẤT JSON theo lược đồ đã nêu.\n\n"
         f"{exam_text.strip()}"
     )
-    resp = _client.models.generate_content(model=MODEL_NAME, contents=prompt, config=cfg)
-    data = getattr(resp, "parsed", None)
-    if data is None:
-        data = json.loads(resp.text)
-
+    
+    logger.info(f"Prompt length: {len(prompt)} chars")
+    logger.info(f"Using model: {MODEL_NAME}")
+    
+    try:
+        resp = _client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_ANALYZE},
+                {"role": "user", "content": prompt}
+            ],
+            max_completion_tokens=14000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "exam_analysis",
+                    "schema": ANALYZE_SCHEMA
+                }
+            },
+            #reasoning_effort="low"
+        )
+        
+        logger.info(f"API Response received")
+        if hasattr(resp, 'usage') and resp.usage:
+            logger.info(f"Token usage: {resp.usage}")
+        
+        raw_content = resp.choices[0].message.content
+        logger.info(f"Raw response length: {len(raw_content)} chars")
+        logger.info(f"Raw response: {raw_content}")
+        
+        data = json.loads(raw_content)
+        logger.info(f"JSON parsed successfully")
+        logger.info(f"Parsed data keys: {list(data.keys())}")
+        
+        if "questions" in data:
+            logger.info(f"Number of questions found: {len(data['questions'])}")
+            for i, q in enumerate(data['questions'][:3]):  # Log first 3 questions
+                logger.info(f"Question {i+1}: {q}")
+        else:
+            logger.warning(f"No 'questions' key in response: {data}")
+            
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        logger.error(f"Raw content causing error: {raw_content}")
+        return []
+    except Exception as e:
+        logger.error(f"API call error: {e}")
+        return []
+    
     out: List[Dict[str, Any]] = []
-    for it in data:
-        out.append({
+    for it in data.get("questions", []):
+        question_item = {
             "text": str(it["text"]).strip(),
             "difficulty": int(it["difficulty"]),
             "order_index": int(it["order_index"]),
-            "part_label": str(it.get("part_label") or "").strip(),  # có thể "1.a"
+            "part_label": str(it.get("part_label") or "").strip(),
             "knowledge_topics": [str(x).strip() for x in (it.get("knowledge_topics") or [])][:4],
-        })
+        }
+        out.append(question_item)
+        logger.debug(f"Processed question: {question_item}")
+        
+    logger.info(f"=== ANALYZE EXAM END === Returning {len(out)} questions")
     return out
 
 def segment_submission(exam_outline: List[QuestionLite], submission_text: str) -> Dict[str, Any]:
-    cfg_kwargs = dict(
-        system_instruction=SYSTEM_PROMPT_SEGMENT,
-        temperature=0.1,
-        response_mime_type=RESP_MIME,
-        response_schema=_schema_segment(),
-    )
-    tk = _thinking_config(THINK_SEGMENT)
-    if tk is not None:
-        cfg_kwargs["thinking"] = tk
+    logger.info("=== SEGMENT SUBMISSION START ===")
+    
+    if not submission_text or not submission_text.strip():
+        logger.warning("Submission text is empty. Returning empty segment list.")
+        return {"items": []}
 
-    cfg = types.GenerateContentConfig(**cfg_kwargs)
-
-    # Rút gọn outline để giảm token; vẫn kèm part_label đa cấp nếu có
     outline_min = [
         {
             "question_id": q.question_id,
             "order_index": q.order_index,
-            "part_label": q.part_label,        # có thể "", "a" hoặc "1.a"
+            "part_label": q.part_label,
             "text_short": q.text_short[:200],
             "keywords": q.keywords[:5],
         }
@@ -234,8 +259,43 @@ def segment_submission(exam_outline: List[QuestionLite], submission_text: str) -
         f"(1) OUTLINE:\n{json.dumps(outline_min, ensure_ascii=False)}\n\n"
         "(2) SUBMISSION:\n" + submission_text.strip()
     )
-    resp = _client.models.generate_content(model=MODEL_NAME, contents=user_msg, config=cfg)
-    data = getattr(resp, "parsed", None)
-    if data is None:
-        data = json.loads(resp.text)
-    return data 
+    
+    raw_content = "" # Khởi tạo biến để truy cập được trong khối except
+    try:
+        resp = _client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_SEGMENT},
+                {"role": "user", "content": user_msg}
+            ],
+            max_completion_tokens=14000,
+            #temperature=TEMPERATURE,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "submission_segmentation",
+                    "schema": SEGMENT_SCHEMA
+                }
+            }
+        )
+        
+        raw_content = resp.choices[0].message.content
+        logger.info(f"API response for segmentation received. Length: {len(raw_content)} chars.")
+        
+        # 1. KIỂM TRA CHUỖI RỖNG: Nếu rỗng, trả về dictionary rỗng hợp lệ
+        if not raw_content or not raw_content.strip():
+            logger.warning("API returned an empty string, possibly due to content filtering. Returning a valid empty dict.")
+            return {"items": []}
+            
+        # 2. PARSE JSON: Nếu không rỗng, tiến hành parse
+        return json.loads(raw_content)
+
+    except json.JSONDecodeError as e:
+        logger.error(f"JSONDecodeError during segmentation: {e}")
+        logger.error(f"Raw content that caused the error: {raw_content}")
+        # Trả về dictionary rỗng hợp lệ khi JSON không đúng định dạng
+        return {"items": []}
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during segmentation API call: {e}")
+        # Trả về dictionary rỗng hợp lệ cho mọi lỗi khác
+        return {"items": []}
