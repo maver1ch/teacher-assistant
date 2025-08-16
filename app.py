@@ -24,7 +24,7 @@ from services.ocr_service import ocr
 from services.llm_service import analyze_exam, segment_submission, QuestionLite
 from database.db_manager import db
 from database.models import Exam, Submission, Question, SubmissionItem
-from services.grading_service import grade_submission, build_final_report
+from services.grading_service import grade_submission, build_final_report, get_or_generate_report
 from services.solution_service import create_and_save_solution, get_solution_by_question
 
 # ---------- App config
@@ -148,6 +148,49 @@ with st.sidebar:
             else:
                 st.info("Exam này chưa có Submission.")
 
+    # Export CSV functionality
+    st.markdown("---")
+    st.markdown("**📊 Export dữ liệu**")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📋 Export Gradings", use_container_width=True):
+            try:
+                from export_gradings import export_gradings_to_csv
+                filename = export_gradings_to_csv()
+                st.success(f"✅ Exported: {filename}")
+                
+                # Provide download button
+                with open(filename, "rb") as file:
+                    st.download_button(
+                        "⬇️ Download CSV",
+                        data=file,
+                        file_name=filename,
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            except Exception as e:
+                st.error(f"❌ Export failed: {e}")
+    
+    with col2:
+        if st.button("📈 Export Summary", use_container_width=True):
+            try:
+                from export_gradings import export_summary_by_student
+                filename = export_summary_by_student()
+                st.success(f"✅ Exported: {filename}")
+                
+                # Provide download button  
+                with open(filename, "rb") as file:
+                    st.download_button(
+                        "⬇️ Download CSV",
+                        data=file,
+                        file_name=filename,
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            except Exception as e:
+                st.error(f"❌ Export failed: {e}")
+
     # Chỉ khi bấm nút này mới ÁP DỤNG lựa chọn + NHẢY BƯỚC
     if st.button("⏩ Đi đến bước đã chọn", use_container_width=True):
         ok = True
@@ -166,6 +209,11 @@ with st.sidebar:
                 ss.exam_id = pending_exam_id
             if pending_submission_id:
                 ss.submission_id = pending_submission_id
+                # Load submission original_text khi chọn submission
+                submission = db.get_submission_by_id(pending_submission_id)
+                if submission and submission.original_text:
+                    ss.submission_text = submission.original_text
+                    ss.submission_editor_text = submission.original_text
 
             ss.current_step = desired_step
             st.rerun()
@@ -231,7 +279,7 @@ if ss.current_step == 1:
                     if not exam_name:
                         st.error("Vui lòng nhập Tên đề bài.")
                     else:
-                        exam_id = db.create_exam(exam_name)
+                        exam_id = db.create_exam(exam_name, ss.editor_text)
                         ss.exam_id = exam_id
                         ss.ocr_text = ss.editor_text
                         ss.current_step = 2
@@ -423,45 +471,97 @@ elif ss.current_step == 3 and ss.exam_id:
 # ====================== STEP 4 (OLD STEP 3): UPLOAD BÀI LÀM ======================
 elif ss.current_step == 4 and ss.exam_id:
     st.header("Bước 4: Upload và OCR bài làm học sinh")
-    st.info(f"📌 Đề • ID: {ss.exam_id}")
+    
+    # Auto load submission text nếu đã chọn submission
+    if ss.submission_id and not ss.submission_text:
+        submission = db.get_submission_by_id(ss.submission_id)
+        if submission and submission.original_text:
+            ss.submission_text = submission.original_text
+            ss.submission_editor_text = submission.original_text
+            st.success(f"📁 Đã load bài làm từ DB (Submission #{ss.submission_id})")
+    
+    if ss.submission_id:
+        st.info(f"📌 Đề • ID: {ss.exam_id} | 📝 Bài làm • ID: {ss.submission_id}")
+    else:
+        st.info(f"📌 Đề • ID: {ss.exam_id}")
 
-    upl, act = st.columns([1, 1])
-    with upl:
-        st.subheader("📤 Upload ảnh bài làm (nhiều ảnh)")
-        submission_files = st.file_uploader(
-            "Chọn ảnh bài làm", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="submission_files"
-        )
+    # Hiển thị bài làm đã load từ DB
+    if ss.submission_text:
+        st.subheader("📄 Bài làm học sinh")
+        source_indicator = "📁 Đã load từ DB" if ss.submission_id else "🔍 Vừa OCR"
+        st.caption(f"{source_indicator} • Độ dài: {len(ss.submission_text)} ký tự")
+        
+        with st.expander("👀 Xem nội dung bài làm", expanded=True):
+            display_math_text(ss.submission_text)
+        
+        col_refresh, col_edit = st.columns([1, 1])
+        with col_refresh:
+            if st.button("🔄 Refresh từ DB", disabled=not ss.submission_id):
+                if ss.submission_id:
+                    submission = db.get_submission_by_id(ss.submission_id)
+                    if submission and submission.original_text:
+                        ss.submission_text = submission.original_text
+                        ss.submission_editor_text = submission.original_text
+                        st.success("🔄 Đã refresh từ DB")
+                        st.rerun()
+        
+        with col_edit:
+            if st.button("📝 Chỉnh sửa trực tiếp"):
+                # Sẽ hiển thị editor ở dưới
+                pass
+        
+        st.divider()
 
-        if submission_files and st.button("🔍 OCR bài làm", type="primary", key="start_ocr_submission"):
-            with st.spinner("Đang OCR bài làm..."):
-                temp_paths = []
-                for f in submission_files:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                        tmp.write(f.getbuffer())
-                        temp_paths.append(tmp.name)
+    # Upload section - collapse nếu đã có submission text
+    if not ss.submission_text:
+        st.subheader("📤 Upload và OCR bài làm mới")
+    else:
+        with st.expander("📤 Upload bài làm mới (thay thế hiện tại)", expanded=False):
+            pass  # Nội dung upload sẽ ở trong expander
+    
+    # Nội dung upload
+    upload_container = st.expander("📤 Upload bài làm mới", expanded=not bool(ss.submission_text)) if ss.submission_text else st.container()
+    
+    with upload_container:
+        upl, act = st.columns([1, 1])
+        with upl:
+            st.markdown("**📷 Chọn ảnh bài làm**")
+            submission_files = st.file_uploader(
+                "Upload nhiều ảnh:", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="submission_files"
+            )
 
-                sub_text = ocr.ocr_submission_images(temp_paths)
+            if submission_files and st.button("🔍 OCR bài làm", type="primary", key="start_ocr_submission"):
+                with st.spinner("Đang OCR bài làm..."):
+                    temp_paths = []
+                    for f in submission_files:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                            tmp.write(f.getbuffer())
+                            temp_paths.append(tmp.name)
 
-                for p in temp_paths:
-                    os.unlink(p)
+                    sub_text = ocr.ocr_submission_images(temp_paths)
 
-                ss.submission_text = sub_text
-                ss.submission_name_guess = extract_student_name(sub_text)
-                ss.submission_editor_text = sub_text
-                st.success(f"✅ OCR hoàn thành ({len(submission_files)} ảnh).")
+                    for p in temp_paths:
+                        os.unlink(p)
 
-    with act:
-        st.subheader("🧑‍🎓 Thông tin & Lưu")
-        student_name = st.text_input("Tên học sinh (có thể chỉnh):", value=ss.submission_name_guess or "")
-        if ss.submission_text:
-            if st.button("💾 Lưu bài làm vào DB", type="primary"):
-                sub_id = db.create_submission(
-                    exam_id=ss.exam_id,
-                    student_name=student_name.strip() or "Chưa rõ",
-                    original_text=ss.submission_text
-                )
-                ss.submission_id = sub_id
-                st.success(f"Đã lưu bài làm • Submission ID: {sub_id}")
+                    ss.submission_text = sub_text
+                    ss.submission_name_guess = extract_student_name(sub_text)
+                    ss.submission_editor_text = sub_text
+                    st.success(f"✅ OCR hoàn thành ({len(submission_files)} ảnh).")
+                    st.rerun()
+
+        with act:
+            st.markdown("**👤 Thông tin học sinh**")
+            student_name = st.text_input("Tên học sinh:", value=ss.submission_name_guess or "")
+            if ss.submission_text:
+                if st.button("💾 Lưu bài làm vào DB", type="primary"):
+                    sub_id = db.create_submission(
+                        exam_id=ss.exam_id,
+                        student_name=student_name.strip() or "Chưa rõ",
+                        original_text=ss.submission_text
+                    )
+                    ss.submission_id = sub_id
+                    st.success(f"Đã lưu bài làm • Submission ID: {sub_id}")
+                    st.rerun()
 
     st.divider()
     st.subheader("✏️ Chỉnh sửa bài làm & 👀 Xem trước (real-time)")
@@ -485,7 +585,18 @@ elif ss.current_step == 4 and ss.exam_id:
             st.markdown("**Preview (real-time)**")
             display_math_text(ss.submission_editor_text or ss.submission_text)
     else:
-        st.info("Chưa có nội dung. Hãy upload ảnh và chạy OCR.")
+        # Kiểm tra xem có submission được chọn từ sidebar không
+        if ss.submission_id:
+            submission = db.get_submission_by_id(ss.submission_id)
+            if submission and submission.original_text:
+                ss.submission_text = submission.original_text
+                ss.submission_editor_text = submission.original_text
+                st.success("📁 Đã load bài làm từ DB. Scroll xuống để xem.")
+                st.rerun()
+            else:
+                st.info("Submission đã chọn nhưng chưa có OCR text. Hãy upload ảnh và chạy OCR.")
+        else:
+            st.info("Chưa có nội dung. Hãy upload ảnh và chạy OCR.")
 
     st.divider()
     st.subheader("✂️ Phân đoạn bài làm theo câu hỏi (LLM)")
@@ -517,15 +628,61 @@ elif ss.current_step == 4 and ss.exam_id:
                 )
             )
 
-        if st.button("🔧 Phân đoạn bằng Gemini", use_container_width=True):
-            with st.spinner("Đang phân đoạn..."):
-                data = segment_submission(outline, ss.submission_text)
+        if st.button("🔧 Phân đoạn bằng LLM (Skeleton approach)", use_container_width=True):
+            with st.spinner("Đang phân đoạn với skeleton..."):
+                data = segment_submission(questions, ss.submission_text)
                 ss.segmented_items = data.get("items", [])
-                st.success(f"Đã tách thành {len(ss.segmented_items)} đoạn.")
+                st.success(f"Đã phân đoạn {len(ss.segmented_items)} items từ skeleton.")
 
         if ss.segmented_items:
-            df_seg = pd.DataFrame(ss.segmented_items).sort_values(["position"])
-            st.dataframe(df_seg, use_container_width=True, height=DF_HEIGHT)
+            st.subheader("✏️ Xem và chỉnh sửa kết quả phân đoạn")
+            
+            # Editable dataframe với LaTeX preview
+            col1, col2 = st.columns([3, 2])
+            
+            with col1:
+                st.markdown("**📝 Chỉnh sửa answer_text:**")
+                
+                # Convert to editable DataFrame
+                df_seg = pd.DataFrame(ss.segmented_items).sort_values(["position"])
+                
+                edited_df = st.data_editor(
+                    df_seg,
+                    column_config={
+                        "question_id": st.column_config.NumberColumn("Question ID", disabled=True),
+                        "order_index": st.column_config.NumberColumn("Order", disabled=True), 
+                        "part_label": st.column_config.TextColumn("Part", disabled=True),
+                        "position": st.column_config.NumberColumn("Pos", disabled=True),
+                        "answer_text": st.column_config.TextColumn("Answer Text", width="large")
+                    },
+                    disabled=["question_id", "order_index", "part_label", "position"],
+                    hide_index=True,
+                    use_container_width=True,
+                    height=400,
+                    key="editable_segments"
+                )
+                
+                # Update session state với data đã edit
+                ss.segmented_items = edited_df.to_dict('records')
+            
+            with col2:
+                st.markdown("**🔍 LaTeX Preview:**")
+                
+                # Select row để preview
+                selected_row = st.selectbox(
+                    "Chọn row để preview:",
+                    range(len(edited_df)),
+                    format_func=lambda x: f"Row {x+1}: {edited_df.iloc[x]['order_index']}{edited_df.iloc[x]['part_label']}"
+                )
+                
+                if selected_row is not None:
+                    preview_text = edited_df.iloc[selected_row]['answer_text']
+                    if preview_text and preview_text.strip():
+                        st.markdown("**Preview:**")
+                        with st.container():
+                            display_math_text(preview_text)
+                    else:
+                        st.info("Answer text trống")
 
             if st.button("💾 Lưu chi tiết từng ý (submission_items)", type="primary", use_container_width=True):
                 with db.get_session() as session:
@@ -612,18 +769,38 @@ elif ss.current_step == 5 and ss.exam_id:
                 st.info("Không có mục nào để chấm hoặc submission_id không hợp lệ.")
 
     with colB:
-        if st.button("📝 Tạo bản chấm tổng hợp", use_container_width=True):
-            report_md = build_final_report(int(ss.submission_id))
-            if report_md.strip():
-                st.markdown(report_md)
+        # Hiển thị báo cáo đã lưu nếu có
+        saved_report = db.get_latest_report(int(ss.submission_id))
+        if saved_report:
+            st.success(f"📄 Báo cáo đã lưu • {saved_report.created_at.strftime('%H:%M %d/%m/%Y')}")
+            with st.expander("👀 Xem báo cáo đã lưu", expanded=True):
+                st.markdown(saved_report.report_content)
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("🔄 Tạo lại báo cáo", use_container_width=True):
+                    with st.spinner("Đang tạo báo cáo mới..."):
+                        report_md = build_final_report(int(ss.submission_id))
+                        if report_md.strip():
+                            st.success("✅ Đã tạo báo cáo mới")
+                            st.rerun()
+            with col2:
                 st.download_button(
                     "⬇️ Tải báo cáo (.md)",
-                    data=report_md,
+                    data=saved_report.report_content,
                     file_name=f"grading_report_{int(ss.submission_id)}.md",
                     mime="text/markdown",
+                    use_container_width=True
                 )
-            else:
-                st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
+        else:
+            if st.button("📝 Tạo bản chấm tổng hợp", use_container_width=True):
+                with st.spinner("Đang tạo báo cáo..."):
+                    report_md = build_final_report(int(ss.submission_id))
+                    if report_md.strip():
+                        st.success("✅ Đã tạo và lưu báo cáo")
+                        st.rerun()
+                    else:
+                        st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
 
 # ====================== STEP 6 (OLD STEP 5): XUẤT BÁO CÁO ======================
 elif ss.current_step == 6 and ss.exam_id:

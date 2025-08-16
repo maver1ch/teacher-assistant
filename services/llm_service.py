@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # ---------- Constants
 API_KEY_ENV = "OPENAI_API_KEY"
 MODEL_NAME = "o4-mini-2025-04-16"
+SEGMENT_MODEL = "gpt-4.1-mini"
 TEMPERATURE = 0.1
 
 load_dotenv()
@@ -84,27 +85,29 @@ Kết quả phải là một mảng (Array) các đối tượng `QuestionItem`,
 """
 
 SYSTEM_PROMPT_SEGMENT = """
-Bạn là AI trích xuất/đối sánh bài làm học sinh với danh sách câu hỏi đã cho.
+Bạn là AI chuyên trích xuất nội dung bài làm học sinh từ skeleton có sẵn.
 
 NHIỆM VỤ
-- Nhận vào (1) danh sách câu hỏi (rút gọn) và (2) toàn văn bài làm đã OCR.
-- Cắt bài làm thành các đoạn tương ứng từng câu hỏi.
-- Trả về JSON nghiêm ngặt: mỗi đoạn gắn đúng question_id, giữ nguyên LaTeX ($/$$) và thứ tự xuất hiện.
+- Nhận vào: (1) SKELETON có sẵn order_index/part_label/question_id và (2) toàn văn bài làm
+- Chỉ tìm và điền answer_text cho từng item trong skeleton
+- KHÔNG thay đổi order_index, part_label, question_id, position
 
-QUY TẮC
-1) Dùng ngữ nghĩa (từ khóa, kiến thức) để khớp; KHÔNG phụ thuộc ký hiệu đánh số trong bài làm.
-2) Nếu không thấy phần trả lời cho một câu → tạo item với answer_text = "".
-3) Cho phép gộp nhiều đoạn của cùng một câu thành một chuỗi liên tục (giữ thứ tự).
-4) Không thêm bớt nội dung ngoài bài làm.
+QUY TẮC QUAN TRỌNG
+1) Với mỗi item trong skeleton, tìm phần trả lời tương ứng trong bài làm
+2) Kết hợp Dùng ngữ nghĩa (từ khóa, kiến thức) để khớp + ký hiệu đánh số để xác định (Ví dụ Bài 1.a, Bài 2.3 hoặc Bài 4.1.a, ...)
+3) Nếu tìm thấy → điền vào answer_text (giữ nguyên LaTeX $/$$)
+4) Nếu KHÔNG tìm thấy (học sinh không làm ý đó) → để answer_text = ""
+5) KHÔNG tạo item mới, KHÔNG xóa item khỏi skeleton
+6) Cho phép gộp nhiều đoạn của cùng câu thành chuỗi liên tục
 
 LƯỢC ĐỒ JSON (STRICT)
-- Kết quả chính: items: Array<AnswerItem>
-- Mỗi AnswerItem:
-  - question_id: integer
-  - order_index: integer  (BÀI LỚN của câu hỏi)
-  - part_label: string    (vd "a"/"b"/"c" hoặc "")
-  - position: integer     (thứ tự xuất hiện đoạn trong bài làm, bắt đầu từ 1)
-  - answer_text: string   (đoạn trả lời, giữ nguyên LaTeX)
+- Input skeleton giữ nguyên structure
+- Chỉ fill answer_text cho từng item
+- Kết quả: {"items": [skeleton đã điền answer_text]}
+
+VÍ DỤ:
+Input skeleton: [{"question_id": 1, "order_index": 1, "part_label": "a", "position": 1, "answer_text": ""}]
+Output: {"items": [{"question_id": 1, "order_index": 1, "part_label": "a", "position": 1, "answer_text": "x = 5 vì..."}]}
 """
 
 @dataclass
@@ -114,6 +117,19 @@ class QuestionLite:
     part_label: str
     text_short: str
     keywords: List[str]
+
+def create_submission_skeleton(questions: List) -> List[Dict[str, Any]]:
+    """Create pre-populated skeleton with fixed order_index/part_label"""
+    skeleton = []
+    for q in questions:
+        skeleton.append({
+            "question_id": q.id,
+            "order_index": q.order_index,
+            "part_label": q.part_label or "",
+            "position": len(skeleton) + 1,
+            "answer_text": ""  # Empty - to be filled by LLM
+        })
+    return skeleton
 
 # ---------- JSON Schemas for OpenAI
 ANALYZE_SCHEMA = {
@@ -235,41 +251,35 @@ def analyze_exam(exam_text: str) -> List[Dict[str, Any]]:
     logger.info(f"=== ANALYZE EXAM END === Returning {len(out)} questions")
     return out
 
-def segment_submission(exam_outline: List[QuestionLite], submission_text: str) -> Dict[str, Any]:
+def segment_submission(questions: List, submission_text: str) -> Dict[str, Any]:
     logger.info("=== SEGMENT SUBMISSION START ===")
     
     if not submission_text or not submission_text.strip():
         logger.warning("Submission text is empty. Returning empty segment list.")
         return {"items": []}
 
-    outline_min = [
-        {
-            "question_id": q.question_id,
-            "order_index": q.order_index,
-            "part_label": q.part_label,
-            "text_short": q.text_short[:200],
-            "keywords": q.keywords[:5],
-        }
-        for q in exam_outline
-    ]
-
+    # Create skeleton with pre-populated structure
+    skeleton = create_submission_skeleton(questions)
+    
+    logger.info(f"Created skeleton with {len(skeleton)} items")
+    
     user_msg = (
-        "Dưới đây là (1) danh sách câu hỏi rút gọn và (2) toàn văn bài làm. "
-        "Hãy cắt bài làm thành các phần tương ứng và trả về JSON theo lược đồ.\n\n"
-        f"(1) OUTLINE:\n{json.dumps(outline_min, ensure_ascii=False)}\n\n"
+        "Dưới đây là (1) SKELETON có sẵn cấu trúc và (2) toàn văn bài làm. "
+        "Hãy điền answer_text cho từng item trong skeleton và trả về JSON. Nếu như không tìm được câu tương ứng (tức là học sinh không làm bài thì phần answer_text để rỗng). \n\n"
+        f"(1) SKELETON:\n{json.dumps(skeleton, ensure_ascii=False)}\n\n"
         "(2) SUBMISSION:\n" + submission_text.strip()
     )
-    
+            
     raw_content = "" # Khởi tạo biến để truy cập được trong khối except
     try:
         resp = _client.chat.completions.create(
-            model=MODEL_NAME,
+            model=SEGMENT_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_SEGMENT},
                 {"role": "user", "content": user_msg}
             ],
-            max_completion_tokens=14000,
-            #temperature=TEMPERATURE,
+            max_tokens=10000,
+            temperature=0.1,
             response_format={
                 "type": "json_schema",
                 "json_schema": {

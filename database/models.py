@@ -10,6 +10,7 @@ class Exam(Base):
     __tablename__ = "exams"
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False)
+    original_text = Column(Text)
     created_at = Column(DateTime, default=datetime.now)
 
     questions = relationship("Question", back_populates="exam", cascade="all, delete-orphan")
@@ -41,6 +42,7 @@ class Submission(Base):
     exam = relationship("Exam", back_populates="submissions")
     gradings = relationship("Grading", back_populates="submission", cascade="all, delete-orphan")
     items = relationship("SubmissionItem", back_populates="submission", cascade="all, delete-orphan")
+    reports = relationship("SubmissionReport", back_populates="submission", cascade="all, delete-orphan")
 
 class SubmissionItem(Base):
     __tablename__ = "submission_items"
@@ -87,3 +89,12 @@ class Grading(Base):
 
     submission = relationship("Submission", back_populates="gradings")
     question = relationship("Question", back_populates="gradings")
+
+class SubmissionReport(Base):
+    __tablename__ = "submission_reports"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
+    report_content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+    
+    submission = relationship("Submission", back_populates="reports")

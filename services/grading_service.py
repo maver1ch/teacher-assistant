@@ -24,7 +24,7 @@ CTX_MAX_CHARS_ANSWER = 1200
 
 GRADING_SYSTEM_PROMPT = """
 Bạn là giáo viên Toán chuyên nghiệp tại Việt Nam với 15 năm kinh nghiệm chấm thi. 
-Nhiệm vụ: So sánh bài làm học sinh với lời giải chuẩn và barem chấm điểm để đưa ra đánh giá chính xác.
+Nhiệm vụ: So sánh bài làm học sinh với lời giải chuẩn và barem chấm điểm để đưa ra đánh giá công bằng và khuyến khích.
 
 ### INPUT BẠN NHẬN ĐƯỢC:
 1. **solution_text**: Hướng logic giải chuẩn của câu hỏi
@@ -35,39 +35,37 @@ Nhiệm vụ: So sánh bài làm học sinh với lời giải chuẩn và barem
 ### NHIỆM VỤ PHÂN TÍCH:
 
 #### A) **Lỗ hổng kiến thức** (knowledge_gaps):
-- Xác định kiến thức nào học sinh chưa nắm vững
+- Xác định kiến thức nào học sinh chưa nắm vững THỰC SỰ
 - VD: "Chưa biết điều kiện xác định phân thức", "Không hiểu định lý Pythagore"
-- Chỉ liệt kê những gì THỰC SỰ THIẾU trong bài làm
+- CHỈ liệt kê khi học sinh THỰC SỰ THIẾU kiến thức, không phải khác cách làm
 - Mỗi mục ≤ 20 từ, tối đa 5 mục
 
 #### B) **Lỗi tính toán & logic** (calculation_logic_errors):
-- Những sai sót cụ thể trong quá trình giải
+- Những sai sót THỰC SỰ NGHIÊM TRỌNG trong quá trình giải
 - VD: "Tính sai (-3)² = -9", "Quên đổi dấu khi chuyển vế", "Kết luận sai từ điều kiện đúng"
-- Ghi rõ CHỖ SAI và SỬA THÀNH GÌ
+- CHỈ ghi những lỗi THỰC SỰ SAI, không phải cách làm khác
 - Mỗi mục ≤ 25 từ, tối đa 5 mục
 
 #### C) **Nhận xét tổng quan** (llm_feedback):
-- Đánh giá chi tiết bài làm (120-180 từ)
-- Điểm mạnh, điểm yếu, cách cải thiện
-- Dùng Markdown với **in đậm** cho lỗi quan trọng
-- So sánh với lời giải chuẩn và barem
+- Đánh giá ngắn gọn bài làm (60-100 từ)
+- Tập trung vào điểm cần cải thiện thực sự
+- Khuyến khích những điểm làm đúng
 
 #### D) **Đánh giá kết quả** (is_correct):
-- `true`: Từ đầu đến cuối hoàn toàn chính xác, logic rõ ràng, đáp án đúng
-- `false`: Có ít nhất 1 trong số: kết quả sai, tự luận sai, thiếu bước quan trọng theo barem
+- `true`: Kết quả cuối ĐÚNG + Logic tổng thể HỢP LÝ (có thể khác barem nhưng không sai)
+- `false`: Kết quả SAI hoặc Logic có vấn đề NGHIÊM TRỌNG
 
-### QUY TẮC CHẤM NGHIÊM NGẶT:
-- **Đúng hoàn toàn** mới được `is_correct = true`
-- **Có đáp án đúng** nhưng **thiếu giải thích theo barem** → `false` 
-- **Logic đúng** nhưng **tính toán sai** → `false`
-- **Kết quả đúng** nhưng **cách làm sai** → `false`
-- **Thiếu bước quan trọng** theo barem → `false`
+### QUY TẮC CHẤM LINH HOẠT VÀ CÔNG BẰNG:
+- **Ưu tiên kết quả đúng**: Nếu đáp án đúng + cách làm hợp lý → `true`
+- **Chấp nhận cách khác**: Phương pháp khác barem nhưng đúng logic → `true`
+- **Chỉ chấm sai khi**: Kết quả sai, tính toán sai, logic có lỗi nghiêm trọng
+- **Không bắt bẻ**: Thiếu bước nhỏ nhưng không ảnh hưởng kết quả → vẫn `true`
 
-### NGUYÊN TẮC SO SÁNH:
-- Dựa vào **reasoning_approach** (barem) để đánh giá từng bước
-- Đối chiếu **final_answer** với kết quả học sinh
-- Sử dụng **solution_text** làm chuẩn logic giải
-- Chỉ chấm theo những gì có trong barem, không tự ý thêm yêu cầu
+### NGUYÊN TẮC SO SÁNH KHUYẾN KHÍCH:
+- **final_answer** là tiêu chí chính - đúng đáp án là quan trọng nhất
+- **reasoning_approach** chỉ là tham khảo, không bắt buộc theo từng bước
+- **solution_text** để hiểu logic, nhưng chấp nhận logic khác nếu đúng
+- **Khuyến khích tư duy sáng tạo** của học sinh
 
 ### OUTPUT FORMAT:
 Chỉ trả về JSON nghiêm ngặt theo schema, không thêm text nào khác.
@@ -208,6 +206,8 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
         
         for q, a in pairs:
             if not (a.answer_text or "").strip():
+                # Tạo grading record cho câu không làm với knowledge_topics từ question
+                _create_missing_grading(q, submission_id)
                 continue
             
             ctx = _build_context(order_index, context_stack)
@@ -246,8 +246,7 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
 
 
 def build_final_report(submission_id: int) -> str:
-    """Build a student-friendly Markdown summary from existing gradings.
-    Why: keep DB schema unchanged; UI can display or download.
+    """Build a student-friendly Markdown summary from existing gradings and save to DB.
     """
     with db.get_session() as session:
         grades = (
@@ -272,11 +271,10 @@ def build_final_report(submission_id: int) -> str:
         })
 
     system = (
-        "Bạn là trợ lý sư phạm. Hãy biên tập báo cáo tổng hợp dễ hiểu cho học sinh, ưu tiên dưới dạng Markdown notion:\n"
-        "1) Mở đầu: Tổng quan kết quả (số câu đúng/tổng số câu).\n"
-        "2) Theo từng ý: Trạng thái đúng/sai, tóm tắt lỗi chính và cách khắc phục.\n"
-        "3) Phần tổng kết: Nhóm lỗ hổng kiến thức và lỗi tính toán thường gặp.\n"
-        "4) Đề xuất 3-5 hạng mục ôn tập cụ thể.\n"
+        "Bạn là trợ lý sư phạm. Hãy tạo báo cáo ngắn gọn cho học sinh dưới dạng Markdown:\n"
+        "1) Bảng tóm tắt theo từng câu: Câu X → Trạng thái (✓/✗) → Lỗ hổng kiến thức và lỗi tính toán (nếu có)\n"
+        "2) Tổng kết: Danh sách kiến thức cần ôn tập (gộp từ tất cả knowledge_gaps)\n"
+        "KHÔNG viết phần mở đầu tổng quan dài dòng. Tập trung vào thông tin cần thiết.\n"
         "Chỉ trả về Markdown, không kèm JSON."
     )
 
@@ -294,9 +292,27 @@ def build_final_report(submission_id: int) -> str:
             ],
             temperature=0.2
         )
-        return resp.choices[0].message.content
+        report_content = resp.choices[0].message.content
+        
+        # Save report to database
+        try:
+            db.save_submission_report(submission_id, report_content)
+        except Exception as e:
+            print(f"Warning: Could not save report to DB: {e}")
+        
+        return report_content
     except Exception:
         return "Không thể tạo báo cáo do lỗi hệ thống."
+
+def get_or_generate_report(submission_id: int) -> str:
+    """Get saved report from DB, or generate new one if not exists"""
+    # Try to get saved report first
+    saved_report = db.get_latest_report(submission_id)
+    if saved_report:
+        return saved_report.report_content
+    
+    # Generate new report if not found
+    return build_final_report(submission_id)
 
 
 # =====================
@@ -443,6 +459,29 @@ def _save_grading_new(submission_id: int, question_id: int, knowledge_gaps: List
             row.is_correct = 1 if is_correct else 0
             row.final_score = None
         session.commit()
+
+
+def _create_missing_grading(question: Question, submission_id: int):
+    """Tạo grading record cho câu học sinh không làm, sử dụng knowledge_topics từ question"""
+    # Parse knowledge_topics từ question (JSON string)
+    knowledge_topics = _safe_json_loads(question.knowledge_topics)
+    
+    # Tạo feedback message
+    if knowledge_topics:
+        topics_str = ", ".join(knowledge_topics)
+        feedback = f"Học sinh không làm câu này. Cần ôn tập: {topics_str}"
+    else:
+        feedback = "Học sinh không làm câu này."
+    
+    # Lưu grading record với knowledge_gaps = knowledge_topics
+    _save_grading_new(
+        submission_id=submission_id,
+        question_id=question.id,
+        knowledge_gaps=knowledge_topics,  # Sử dụng knowledge_topics từ question
+        calculation_logic_errors=[],      # Rỗng vì không có tính toán
+        llm_feedback=feedback,
+        is_correct=False                  # Không đúng vì không làm
+    )
 
 
 def _safe_json_loads(s: Optional[str]):
