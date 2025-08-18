@@ -6,6 +6,20 @@ from sqlalchemy.orm import sessionmaker, Session
 from database.models import Base, Exam, Question, Submission, Grading, SubmissionItem, QuestionSolution, SubmissionReport
 from utils.config import DATABASE_PATH
 
+def format_latex_preview(text: str, max_length: int = 100) -> str:
+    """Helper function để format text cho LaTeX preview"""
+    if not text:
+        return ""
+    
+    # Truncate nếu quá dài
+    if len(text) > max_length:
+        text = text[:max_length] + "..."
+    
+    text = text.replace("\\", "\\\\")  # Escape backslashes
+    text = text.replace("$$$", "$$")   # Normalize display math
+    
+    return text
+
 class DatabaseManager:
     def __init__(self):
         os.makedirs("data", exist_ok=True)
@@ -123,5 +137,68 @@ class DatabaseManager:
                 solution.final_answer = final_answer
                 solution.reasoning_approach = reasoning_approach
                 session.commit()
+
+    def create_question(self, exam_id: int, order_index: int, part_label: str, text: str, difficulty: int, knowledge_topics: list) -> int:
+        """Tạo câu hỏi mới trong database"""
+        with self.get_session() as session:
+            knowledge_topics_json = json.dumps(knowledge_topics, ensure_ascii=False)
+            
+            question = Question(
+                exam_id=exam_id,
+                question_text=text,
+                difficulty=difficulty,
+                order_index=order_index,
+                part_label=part_label or "",
+                knowledge_topics=knowledge_topics_json
+            )
+            
+            session.add(question)
+            session.commit()
+            return question.id
+
+    def get_question_by_text(self, exam_id: int, question_text: str):
+        """Tìm question theo exam_id và text để lấy ID"""
+        with self.get_session() as session:
+            return session.query(Question).filter(
+                Question.exam_id == exam_id,
+                Question.question_text == question_text
+            ).first()
+
+    def get_solution_preview(self, question_id: int) -> dict:
+        """Lấy solution với LaTeX preview formatted"""
+        solution = self.get_solution_by_question(question_id)
+        if not solution:
+            return {}
+        
+        return {
+            "id": solution.id,
+            "question_id": solution.question_id,
+            "order_index": solution.order_index,
+            "part_label": solution.part_label,
+            "solution_preview": format_latex_preview(solution.solution_text, 150),
+            "final_answer_preview": format_latex_preview(solution.final_answer, 80),
+            "reasoning_preview": format_latex_preview(solution.reasoning_approach, 120),
+            "created_at": solution.created_at
+        }
+
+    def get_questions_with_preview(self, exam_id: int):
+        """Lấy danh sách questions với LaTeX preview"""
+        with self.get_session() as session:
+            questions = session.query(Question).filter(
+                Question.exam_id == exam_id
+            ).order_by(Question.order_index, Question.id).all()
+            
+            results = []
+            for q in questions:
+                results.append({
+                    "id": q.id,
+                    "order_index": q.order_index,
+                    "part_label": q.part_label or "",
+                    "question_preview": format_latex_preview(q.question_text, 120),
+                    "difficulty": q.difficulty or 0,  # Default 0 if not set yet
+                    "knowledge_topics": json.loads(q.knowledge_topics or "[]")
+                })
+            
+            return results
 
 db = DatabaseManager()

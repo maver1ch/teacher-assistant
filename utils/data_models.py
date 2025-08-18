@@ -35,3 +35,4 @@ class SolutionResult:
     solution_text: str
     final_answer: str
     reasoning_approach: str
+    difficulty: int

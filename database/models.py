@@ -3,7 +3,6 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
-# Why: single declarative base
 Base = declarative_base()
 
 class Exam(Base):
@@ -21,7 +20,7 @@ class Question(Base):
     id = Column(Integer, primary_key=True)
     exam_id = Column(Integer, ForeignKey("exams.id"), nullable=False)
     question_text = Column(Text, nullable=False)
-    difficulty = Column(Integer, default=1)
+    difficulty = Column(Integer, default=0)  # 0=chưa đánh giá, sẽ được set khi tạo solution
     order_index = Column(Integer, nullable=False)     # BÀI LỚN
     part_label = Column(String(32))                   # multi-level label, e.g. "1.a" or "IV.1.b"
     knowledge_topics = Column(Text, default="[]")     # JSON string
@@ -50,7 +49,7 @@ class SubmissionItem(Base):
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
     order_index = Column(Integer, nullable=False)     # BÀI LỚN (duplicate for query convenience)
-    part_label = Column(String(8))                    # "a"/"b"/"c" hoặc None
+    part_label = Column(String(32))                   # multi-level label, consistent with Question
     position = Column(Integer, default=1)             # thứ tự xuất hiện trong bài làm
     answer_text = Column(Text)                        # đoạn trả lời
 
@@ -61,8 +60,6 @@ class QuestionSolution(Base):
     __tablename__ = "question_solutions"
     id = Column(Integer, primary_key=True)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
-    order_index = Column(Integer, nullable=False)
-    part_label = Column(String(32))
     solution_text = Column(Text, nullable=False)
     final_answer = Column(Text)
     reasoning_approach = Column(Text)

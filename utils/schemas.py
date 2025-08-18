@@ -11,7 +11,6 @@ ANALYZE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "difficulty": {"type": "integer"},
                     "order_index": {"type": "integer"},
                     "part_label": {"type": "string"},
                     "knowledge_topics": {
@@ -19,7 +18,7 @@ ANALYZE_SCHEMA = {
                         "items": {"type": "string"}
                     }
                 },
-                "required": ["text", "difficulty", "order_index", "part_label", "knowledge_topics"]
+                "required": ["text", "order_index", "part_label", "knowledge_topics"]
             }
         }
     },
@@ -86,7 +85,8 @@ SOLUTION_SCHEMA = {
     "properties": {
         "solution_text": {"type": "string"},
         "final_answer": {"type": "string"},
-        "reasoning_approach": {"type": "string"}
+        "reasoning_approach": {"type": "string"},
+        "difficulty": {"type": "integer", "minimum": 1, "maximum": 10}
     },
-    "required": ["solution_text", "final_answer", "reasoning_approach"]
+    "required": ["solution_text", "final_answer", "reasoning_approach", "difficulty"]
 }
