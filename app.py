@@ -8,12 +8,8 @@ import pandas as pd
 import re
 import json
 
-# ---------- Constants (single source of truth)
-PAGE_TITLE = "Trợ lý Chấm bài"
-PAGE_ICON = "📚"
-LAYOUT = "wide"
-EDITOR_HEIGHT = 420
-DF_HEIGHT = 360
+# ---------- Import config
+from utils.config import PAGE_TITLE, PAGE_ICON, LAYOUT, EDITOR_HEIGHT, DF_HEIGHT
 
 # ---------- Logging
 logging.basicConfig(level=logging.INFO)
@@ -43,19 +39,161 @@ ss.setdefault("submission_name_guess", "")
 ss.setdefault("submission_id", None)
 ss.setdefault("segmented_items", [])
 ss.setdefault("submission_editor_text", "")
+ss.setdefault("selected_line", {})  # Track selected lines for different editors
 
 # ---------- Helpers
-def display_math_text(text: str):
+def display_math_text(text: str, enable_line_click: bool = False, target_key: str = None):
     # Why: dùng 1 API thống nhất để tránh Streamlit auto-render lạ
     if text is None:
         return
-    for raw in str(text).splitlines():
+    
+    lines = str(text).splitlines()
+    if not enable_line_click:
+        # Original behavior for backward compatibility
+        for raw in lines:
+            s = str(raw).rstrip()
+            if not s or s.strip().lower() == "none":
+                st.markdown("&nbsp;")  # giữ khoảng trống nhẹ, không in 'None'
+                continue
+            st.markdown(s)
+        return
+    
+    # Enhanced version with clickable lines and line numbers
+    css_and_js = """
+    <style>
+    .line-container {
+        display: flex;
+        align-items: flex-start;
+        margin: 2px 0;
+        padding: 2px 5px;
+        border-radius: 3px;
+        transition: background-color 0.2s;
+    }
+    .line-container:hover {
+        background-color: #f0f2f6;
+        cursor: pointer;
+    }
+    .line-container.highlighted {
+        background-color: #e8f4f8;
+        border-left: 3px solid #0066cc;
+    }
+    .line-number {
+        min-width: 30px;
+        color: #666;
+        font-size: 12px;
+        font-family: monospace;
+        padding-right: 10px;
+        user-select: none;
+        text-align: right;
+    }
+    .line-content {
+        flex: 1;
+        line-height: 1.4;
+    }
+    </style>
+    
+    <script>
+    function scrollToEditorLine(lineNum, targetKey) {
+        // Store selected line in session state for editor highlighting
+        const event = new CustomEvent('lineSelected', {
+            detail: { lineNumber: lineNum, targetKey: targetKey }
+        });
+        window.dispatchEvent(event);
+        
+        // Highlight the clicked line
+        document.querySelectorAll('.line-container').forEach(el => {
+            el.classList.remove('highlighted');
+        });
+        document.getElementById('line-' + targetKey + '-' + lineNum).classList.add('highlighted');
+    }
+    </script>
+    """
+    
+    st.components.v1.html(css_and_js, height=0)
+    
+    html_content = ""
+    for i, raw in enumerate(lines, 1):
         s = str(raw).rstrip()
+        line_id = f"line-{target_key}-{i}"
+        
         if not s or s.strip().lower() == "none":
-            st.markdown("&nbsp;")  # giữ khoảng trống nhẹ, không in 'None'
-            continue
-        # st.markdown render được cả thường lẫn LaTeX ($/$$)
-        st.markdown(s)
+            content = "&nbsp;"
+        else:
+            # Escape HTML but preserve LaTeX
+            content = s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            
+        html_content += f'''
+        <div class="line-container" id="{line_id}" onclick="scrollToEditorLine({i}, '{target_key}')">
+            <div class="line-number">{i}</div>
+            <div class="line-content">{content}</div>
+        </div>
+        '''
+    
+    # Display the interactive content
+    st.components.v1.html(html_content, height=len(lines) * 25 + 20)
+    
+    # Also render with regular markdown for LaTeX processing
+    with st.expander("📄 Rendered LaTeX View", expanded=False):
+        for raw in lines:
+            s = str(raw).rstrip()
+            if not s or s.strip().lower() == "none":
+                st.markdown("&nbsp;")
+                continue
+            st.markdown(s)
+
+def create_enhanced_text_area(label: str, value: str, height: int, key: str, target_key: str = None):
+    """Enhanced text area with line highlighting support"""
+    
+    # Add JavaScript to listen for line selection events
+    js_listener = f"""
+    <script>
+    function highlightEditorLine_{target_key}(lineNum) {{
+        // This will be handled by Streamlit's text area component
+        // For now, we'll store the line number in session state
+        console.log('Selected line:', lineNum, 'for target:', '{target_key}');
+    }}
+    
+    window.addEventListener('lineSelected', function(event) {{
+        if (event.detail.targetKey === '{target_key}') {{
+            highlightEditorLine_{target_key}(event.detail.lineNumber);
+            
+            // Try to scroll to the approximate line in the text area
+            const textArea = document.querySelector('[data-testid="stTextArea"] textarea[aria-label*="{label}"]');
+            if (textArea) {{
+                const lines = textArea.value.split('\\n');
+                const targetLine = event.detail.lineNumber - 1;
+                if (targetLine >= 0 && targetLine < lines.length) {{
+                    // Calculate approximate character position
+                    let charPos = 0;
+                    for (let i = 0; i < targetLine; i++) {{
+                        charPos += lines[i].length + 1; // +1 for newline
+                    }}
+                    
+                    // Set cursor position
+                    textArea.focus();
+                    textArea.setSelectionRange(charPos, charPos + lines[targetLine].length);
+                    
+                    // Scroll to make the line visible
+                    const lineHeight = 20; // approximate line height
+                    const scrollTop = targetLine * lineHeight - textArea.clientHeight / 2;
+                    textArea.scrollTop = Math.max(0, scrollTop);
+                }}
+            }}
+        }}
+    }});
+    </script>
+    """
+    
+    if target_key:
+        st.components.v1.html(js_listener, height=0)
+    
+    return st.text_area(
+        label,
+        value=value,
+        height=height,
+        key=key,
+        help="Click on lines in the preview to navigate here"
+    )
 
 def extract_student_name(txt: str) -> str:
     # Why: quick guess only; teacher can edit
@@ -109,13 +247,12 @@ with st.sidebar:
         3: "3️⃣ Tạo lời giải",
         4: "4️⃣ Upload bài làm",
         5: "5️⃣ Chấm bài",
-        6: "6️⃣ Xuất báo cáo",
     }
 
     desired_step = st.selectbox(
         "🔀 Đi tới bước",
-        options=[1, 2, 3, 4, 5, 6],
-        index=max(0, min(ss.current_step, 6) - 1),
+        options=[1, 2, 3, 4, 5],
+        index=max(0, min(ss.current_step, 5) - 1),
         format_func=lambda x: step_labels[x],
         key="jump_step_select",
     )
@@ -265,9 +402,12 @@ if ss.current_step == 1:
 
         with c1:
             st.markdown("**Editor**")
-            ss.editor_text = st.text_area(
-                "Nội dung đề (LaTeX dùng $/$$):", value=ss.editor_text, height=EDITOR_HEIGHT,
-                help="Inline: $x^2$, Display: $$\\frac{a}{b}$$", key="editor_area"
+            ss.editor_text = create_enhanced_text_area(
+                "Nội dung đề (LaTeX dùng $/$$):", 
+                value=ss.editor_text, 
+                height=EDITOR_HEIGHT,
+                key="editor_area",
+                target_key="editor"
             )
             b1, b2, _ = st.columns([1, 1, 3])
             with b1:
@@ -287,7 +427,7 @@ if ss.current_step == 1:
 
         with c2:
             st.markdown("**Preview (real-time)**")
-            display_math_text(ss.editor_text)
+            display_math_text(ss.editor_text, enable_line_click=True, target_key="editor")
 
 # ====================== STEP 2 ======================
 elif ss.current_step == 2 and ss.exam_id:
@@ -320,7 +460,21 @@ elif ss.current_step == 2 and ss.exam_id:
     with cB:
         if ss.parsed_questions:
             df_prev = pd.DataFrame(ss.parsed_questions).sort_values(["order_index", "part_label"])
-            st.dataframe(df_prev, use_container_width=True, height=DF_HEIGHT)
+            edited_df = st.data_editor(
+                df_prev, 
+                use_container_width=True, 
+                height=DF_HEIGHT,
+                column_config={
+                    "order_index": st.column_config.NumberColumn("Order", disabled=False),
+                    "part_label": st.column_config.TextColumn("Part", disabled=False),
+                    "text": st.column_config.TextColumn("Text", disabled=False, width="large"),
+                    "difficulty": st.column_config.NumberColumn("Difficulty", disabled=False, min_value=1, max_value=10),
+                    "knowledge_topics": st.column_config.TextColumn("Knowledge Topics", disabled=False)
+                },
+                key="edit_parsed_questions"
+            )
+            # Update session state with edited data
+            ss.parsed_questions = edited_df.to_dict('records')
 
     if ss.parsed_questions:
         st.divider()
@@ -365,7 +519,19 @@ elif ss.current_step == 2 and ss.exam_id:
                 ]
             ).sort_values(["order_index", "part_label"])
             st.markdown("**Danh sách câu hỏi (DB):**")
-            st.dataframe(df_db, use_container_width=True, height=DF_HEIGHT)
+            edited_db_df = st.data_editor(
+                df_db, 
+                use_container_width=True, 
+                height=DF_HEIGHT,
+                column_config={
+                    "order_index": st.column_config.NumberColumn("Order", disabled=False),
+                    "part_label": st.column_config.TextColumn("Part", disabled=False),
+                    "text": st.column_config.TextColumn("Text", disabled=False, width="large"),
+                    "difficulty": st.column_config.NumberColumn("Difficulty", disabled=False, min_value=1, max_value=10),
+                    "knowledge_topics": st.column_config.TextColumn("Knowledge Topics", disabled=False)
+                },
+                key="edit_db_questions"
+            )
 
 # ====================== STEP 3 (NEW): TẠO LỜI GIẢI ======================
 elif ss.current_step == 3 and ss.exam_id:
@@ -464,7 +630,19 @@ elif ss.current_step == 3 and ss.exam_id:
         
         if solutions_data:
             df_solutions = pd.DataFrame(solutions_data)
-            st.dataframe(df_solutions, use_container_width=True, height=300)
+            edited_solutions_df = st.data_editor(
+                df_solutions, 
+                use_container_width=True, 
+                height=300,
+                column_config={
+                    "Câu": st.column_config.TextColumn("Câu", disabled=False),
+                    "Nội dung": st.column_config.TextColumn("Nội dung", disabled=False, width="large"),
+                    "Có lời giải": st.column_config.TextColumn("Có lời giải", disabled=True),
+                    "Độ khó": st.column_config.NumberColumn("Độ khó", disabled=False, min_value=1, max_value=10),
+                    "Tạo lúc": st.column_config.TextColumn("Tạo lúc", disabled=True)
+                },
+                key="edit_solutions_overview"
+            )
     else:
         st.warning("Không có câu hỏi nào. Vui lòng quay lại Bước 2 để phân tích đề.")
 
@@ -494,74 +672,53 @@ elif ss.current_step == 4 and ss.exam_id:
         with st.expander("👀 Xem nội dung bài làm", expanded=True):
             display_math_text(ss.submission_text)
         
-        col_refresh, col_edit = st.columns([1, 1])
-        with col_refresh:
-            if st.button("🔄 Refresh từ DB", disabled=not ss.submission_id):
-                if ss.submission_id:
-                    submission = db.get_submission_by_id(ss.submission_id)
-                    if submission and submission.original_text:
-                        ss.submission_text = submission.original_text
-                        ss.submission_editor_text = submission.original_text
-                        st.success("🔄 Đã refresh từ DB")
-                        st.rerun()
-        
-        with col_edit:
-            if st.button("📝 Chỉnh sửa trực tiếp"):
-                # Sẽ hiển thị editor ở dưới
-                pass
         
         st.divider()
 
-    # Upload section - collapse nếu đã có submission text
+    # Simplified upload section
     if not ss.submission_text:
         st.subheader("📤 Upload và OCR bài làm mới")
-    else:
-        with st.expander("📤 Upload bài làm mới (thay thế hiện tại)", expanded=False):
-            pass  # Nội dung upload sẽ ở trong expander
     
-    # Nội dung upload
-    upload_container = st.expander("📤 Upload bài làm mới", expanded=not bool(ss.submission_text)) if ss.submission_text else st.container()
-    
-    with upload_container:
-        upl, act = st.columns([1, 1])
-        with upl:
-            st.markdown("**📷 Chọn ảnh bài làm**")
-            submission_files = st.file_uploader(
-                "Upload nhiều ảnh:", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="submission_files"
-            )
+    # Upload interface (always available)
+    upl, act = st.columns([1, 1])
+    with upl:
+        st.markdown("**📷 Chọn ảnh bài làm**")
+        submission_files = st.file_uploader(
+            "Upload nhiều ảnh:", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="submission_files"
+        )
 
-            if submission_files and st.button("🔍 OCR bài làm", type="primary", key="start_ocr_submission"):
-                with st.spinner("Đang OCR bài làm..."):
-                    temp_paths = []
-                    for f in submission_files:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                            tmp.write(f.getbuffer())
-                            temp_paths.append(tmp.name)
+        if submission_files and st.button("🔍 OCR bài làm", type="primary", key="start_ocr_submission"):
+            with st.spinner("Đang OCR bài làm..."):
+                temp_paths = []
+                for f in submission_files:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                        tmp.write(f.getbuffer())
+                        temp_paths.append(tmp.name)
 
-                    sub_text = ocr.ocr_submission_images(temp_paths)
+                sub_text = ocr.ocr_submission_images(temp_paths)
 
-                    for p in temp_paths:
-                        os.unlink(p)
+                for p in temp_paths:
+                    os.unlink(p)
 
-                    ss.submission_text = sub_text
-                    ss.submission_name_guess = extract_student_name(sub_text)
-                    ss.submission_editor_text = sub_text
-                    st.success(f"✅ OCR hoàn thành ({len(submission_files)} ảnh).")
-                    st.rerun()
+                ss.submission_text = sub_text
+                ss.submission_name_guess = extract_student_name(sub_text)
+                ss.submission_editor_text = sub_text
+                st.success(f"✅ OCR hoàn thành ({len(submission_files)} ảnh).")
+                st.rerun()
 
-        with act:
-            st.markdown("**👤 Thông tin học sinh**")
-            student_name = st.text_input("Tên học sinh:", value=ss.submission_name_guess or "")
-            if ss.submission_text:
-                if st.button("💾 Lưu bài làm vào DB", type="primary"):
-                    sub_id = db.create_submission(
-                        exam_id=ss.exam_id,
-                        student_name=student_name.strip() or "Chưa rõ",
-                        original_text=ss.submission_text
-                    )
-                    ss.submission_id = sub_id
-                    st.success(f"Đã lưu bài làm • Submission ID: {sub_id}")
-                    st.rerun()
+    with act:
+        st.markdown("**👤 Thông tin học sinh**")
+        student_name = st.text_input("Tên học sinh:", value=ss.submission_name_guess or "")
+        if ss.submission_text:
+            if st.button("💾 Lưu bài làm vào DB", type="primary"):
+                sub_id = db.create_submission(
+                    exam_id=ss.exam_id,
+                    student_name=student_name.strip() or "Chưa rõ",
+                    original_text=ss.submission_text
+                )
+                ss.submission_id = sub_id
+                st.success(f"Đã lưu bài làm • Submission ID: {sub_id}")
+                st.rerun()
 
     st.divider()
     st.subheader("✏️ Chỉnh sửa bài làm & 👀 Xem trước (real-time)")
@@ -570,12 +727,12 @@ elif ss.current_step == 4 and ss.exam_id:
 
         with c1:
             st.markdown("**Editor (bài làm học sinh)**")
-            ss.submission_editor_text = st.text_area(
+            ss.submission_editor_text = create_enhanced_text_area(
                 "Nội dung (LaTeX dùng $/$$):",
                 value=ss.submission_editor_text,
                 height=EDITOR_HEIGHT,
-                help="Inline: $x^2$, Display: $$\\frac{a}{b}$$",
-                key="submission_editor_area"
+                key="submission_editor_area",
+                target_key="submission_editor"
             )
             if st.button("💾 Lưu (preview)", key="btn_save_submission_preview"):
                 ss.submission_text = ss.submission_editor_text
@@ -583,7 +740,7 @@ elif ss.current_step == 4 and ss.exam_id:
 
         with c2:
             st.markdown("**Preview (real-time)**")
-            display_math_text(ss.submission_editor_text or ss.submission_text)
+            display_math_text(ss.submission_editor_text or ss.submission_text, enable_line_click=True, target_key="submission_editor")
     else:
         # Kiểm tra xem có submission được chọn từ sidebar không
         if ss.submission_id:
@@ -754,6 +911,12 @@ elif ss.current_step == 5 and ss.exam_id:
                                     st.write(f"• {gap}")
                             else:
                                 st.write("✅ Không có lỗ hổng kiến thức")
+                            
+                            st.markdown("**🏷️ Tags kiến thức:**")
+                            if r.knowledge_gap_tag:
+                                st.write(", ".join(r.knowledge_gap_tag))
+                            else:
+                                st.write("Không có tag")
                         
                         with col2:
                             st.markdown("**⚠️ Lỗi tính toán & logic:**")
@@ -762,9 +925,12 @@ elif ss.current_step == 5 and ss.exam_id:
                                     st.write(f"• {error}")
                             else:
                                 st.write("✅ Không có lỗi tính toán/logic")
-                        
-                        st.markdown("**💬 Nhận xét tổng quan:**")
-                        st.markdown(r.llm_feedback)
+                            
+                            st.markdown("**🏷️ Tags lỗi:**")
+                            if r.error_tag:
+                                st.write(", ".join(r.error_tag))
+                            else:
+                                st.write("Không có tag")
             else:
                 st.info("Không có mục nào để chấm hoặc submission_id không hợp lệ.")
 
@@ -802,11 +968,6 @@ elif ss.current_step == 5 and ss.exam_id:
                     else:
                         st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
 
-# ====================== STEP 6 (OLD STEP 5): XUẤT BÁO CÁO ======================
-elif ss.current_step == 6 and ss.exam_id:
-    st.header("Bước 6: Xuất báo cáo")
-    st.info("Bạn có thể tạo báo cáo ở Bước 5 (nút 'Tạo bản chấm tổng hợp').")
-    st.warning("(Placeholder) Tuỳ ý mở rộng thêm các định dạng export khác: PDF/Docx,...")
 
 st.divider()
 st.caption("Teacher Assistant v1.0 - MVP")

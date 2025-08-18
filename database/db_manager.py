@@ -4,8 +4,7 @@ import json
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from database.models import Base, Exam, Question, Submission, Grading, SubmissionItem, QuestionSolution, SubmissionReport
-
-DATABASE_PATH = "data/database.db"
+from utils.config import DATABASE_PATH
 
 class DatabaseManager:
     def __init__(self):

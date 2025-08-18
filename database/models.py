@@ -76,10 +76,11 @@ class Grading(Base):
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
     
-    # 3 yếu tố phân tích mới
+    # 4 yếu tố phân tích mới
     knowledge_gaps = Column(Text)           # Lỗ hổng kiến thức (JSON array)
-    calculation_logic_errors = Column(Text) # Lỗi tính toán/logic (JSON array)  
-    llm_feedback = Column(Text)             # Nhận xét của LLM
+    calculation_logic_errors = Column(Text) # Lỗi tính toán/logic (JSON array)
+    knowledge_gap_tag = Column(Text)        # Tag keyword cho lỗ hổng kiến thức (JSON array)
+    error_tag = Column(Text)                # Tag keyword cho lỗi sai (JSON array)
     
     # Đánh giá kết quả
     is_correct = Column(Integer, default=0) # 0=False, 1=True - đúng/sai

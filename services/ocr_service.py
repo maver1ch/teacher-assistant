@@ -9,46 +9,13 @@ from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 import base64
-load_dotenv()
-# -------------------- Constants (single source of truth)
-OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
-OCR_MODEL = "gpt-4.1-mini-2025-04-14"
-TEMPERATURE = 0.0
-
-# Heuristics for math wrapping
-MATH_HINT_TOKENS = (
-    "\\frac", "\\sqrt", "\\sum", "\\int", "\\lim", "\\log",
-    "\\sin", "\\cos", "\\tan", "\\left", "\\right",
+from utils.prompts import SYSTEM_PROMPT_OCR
+from utils.config import (
+    API_KEY_ENV, OCR_MODEL, OCR_TEMPERATURE, MATH_HINT_TOKENS, MINIMAL_MATH_TOKENS,
+    USE_COMPREHENSIVE_MATH_DETECTION, INLINE_SYMBOLS, DISPLAY_WRAP, INLINE_WRAP
 )
-INLINE_SYMBOLS = ("^", "_")
-DISPLAY_WRAP = "$$"
-INLINE_WRAP = "$"
+load_dotenv()
 
-# -------------------- SYSTEM PROMPT (tiếng Việt)
-SYSTEM_PROMPT_OCR = """
-Bạn là tác nhân OCR tiếng Việt, chuyên xử lý đề thi Toán.
-
-MỤC TIÊU
-- Chép lại văn bản sạch (UTF-8).
-- Với công thức toán, xuất LaTeX **hợp lệ** để render trực tiếp trong Markdown.
-- Không trả về code fence, không thêm đánh dấu Markdown thừa.
-- Trong bài có một vài hình học được vẽ (đối với các bài hình), nếu gặp thì hãy bỏ qua nó, không OCR.
-
-QUY TẮC ĐỊNH DẠNG TOÁN
-- Giữ nguyên ngữ nghĩa toán; không tự rút gọn hay biến đổi.
-- Dùng LaTeX chuẩn: \\frac{a}{b}, \\sqrt{...}, mũ ^{...}, chỉ số _{...}.
-- Ký hiệu: \\pi, \\alpha, \\beta, \\theta, ^{\\circ}, mũi tên \\Rightarrow/\\Longrightarrow...
-- Ma trận/vec: dùng LaTeX chuẩn nếu có; nếu không chắc chắn, chép nguyên văn.
-
-DELIMITER
-- Dòng là công thức độc lập → bọc **$$...$$** (display).
-- Công thức chen trong câu → bọc **$...$** (inline).
-- Tuyệt đối không dùng ``` hoặc HTML.
-
-LÀM SẠCH
-- Loại bỏ header/footer, số trang, tên Sở/Trường/Kỳ thi, hướng dẫn thí sinh, thang điểm/đáp án, “---HẾT---”.
-- Giữ xuống dòng/đoạn văn hợp lý; giữ dấu câu và khoảng trắng tự nhiên.
-"""
 
 # -------------------- Logger
 logging.basicConfig(level=logging.INFO)
@@ -76,7 +43,12 @@ def _looks_like_formula(line: str) -> bool:
         return False
     if "$" in s:
         return False
-    if any(tok in s for tok in MATH_HINT_TOKENS):
+    
+    # Use comprehensive or minimal token set based on configuration
+    tokens_to_check = MATH_HINT_TOKENS if USE_COMPREHENSIVE_MATH_DETECTION else MINIMAL_MATH_TOKENS
+    
+    # O(1) lookup for each token using set
+    if any(tok in s for tok in tokens_to_check):
         return True
     if any(sym in s for sym in INLINE_SYMBOLS) and "=" in s:
         return True
@@ -99,7 +71,7 @@ def _ensure_latex_delimiters(text: str) -> str:
 # -------------------- Service
 class OCRService:
     def __init__(self) -> None:
-        api_key = os.getenv(OPENAI_API_KEY_ENV)
+        api_key = os.getenv(API_KEY_ENV)
         try:
             self._client = OpenAI(api_key=api_key)
         except TypeError as e:
@@ -132,7 +104,7 @@ class OCRService:
                         ]
                     }
                 ],
-                temperature=TEMPERATURE,
+                temperature=OCR_TEMPERATURE,
                 max_tokens=4000
             )
             
@@ -145,21 +117,21 @@ class OCRService:
 
     # --- OCR cho đề thi (giữ nguyên)
     def ocr_single_image(self, image_path: str) -> str:
-        user_msg = "Hãy chép lại TRANG ĐỀ THI này. Tuân thủ nghiêm các quy tắc LaTeX và delimiter đã nêu."
+        user_msg = "Hãy OCR văn bản Toán học. Tuân thủ nghiêm các quy tắc LaTeX và delimiter đã nêu."
         return self._ocr_single_image_with_msg(image_path, user_msg)
 
     def ocr_multiple_images(self, image_paths: List[str]) -> str:
         parts = [self.ocr_single_image(p) for p in image_paths]
-        return "\n\n---\n\n".join(parts)
+        return "\n\n".join(parts)
 
     # --- OCR cho bài làm học sinh (user message khác)
     def ocr_submission_images(self, image_paths: List[str]) -> str:
         user_msg = (
-            "Đây là BÀI LÀM của học sinh. Hãy chép lại nguyên văn, tuân thủ quy tắc LaTeX và delimiter đã nêu. "
-            "Nếu phát hiện dòng ghi tên học sinh (ví dụ: 'Họ và tên: ...', 'Họ tên: ...', 'Name: ...'), hãy GIỮ NGUYÊN dòng đó."
+            "Đây là BÀI LÀM của học sinh. Hãy chép lại, tuân thủ quy tắc LaTeX và delimiter đã nêu. "
+            "ĐỂ HIỆN THỊ DỄ NHÌN: Output có thể chuyển đổi để HIỂN THỊ về định dạng LATEX hợp lí, TUY NHIÊN không được phép thay đổi ngữ nghĩa của bài làm."
         )
         parts = [self._ocr_single_image_with_msg(p, user_msg) for p in image_paths]
-        return "\n\n---\n\n".join(parts)
+        return "\n\n".join(parts)
 
     def format_math_for_display(self, text: str) -> str:
         # Why: placeholder for future display tweaks

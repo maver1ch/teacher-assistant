@@ -2,101 +2,19 @@ from __future__ import annotations
 
 import os
 import json
-from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from utils.prompts import GRADING_SYSTEM_PROMPT
+from utils.config import MODEL_GRADING, COMMENT_MODEL, GRADING_TEMPERATURE, CTX_MAX_CHARS_QUESTION, CTX_MAX_CHARS_ANSWER
+from utils.schemas import GRADING_SCHEMA
+from utils.data_models import GradingResult
 
 # Database
 from database.db_manager import db
 from database.models import Question, Submission, SubmissionItem, Grading, QuestionSolution
 from services.solution_service import get_solution_by_question
-
-# =====================
-# Constants (single source of truth)
-# =====================
-MODEL_GRADING = "gpt-4.1-mini-2025-04-14"
-COMMENT_MODEL = "gpt-4o-mini"
-TEMPERATURE = 0.1
-CTX_MAX_CHARS_QUESTION = 1200
-CTX_MAX_CHARS_ANSWER = 1200
-
-GRADING_SYSTEM_PROMPT = """
-Bạn là giáo viên Toán chuyên nghiệp tại Việt Nam với 15 năm kinh nghiệm chấm thi. 
-Nhiệm vụ: So sánh bài làm học sinh với lời giải chuẩn và barem chấm điểm để đưa ra đánh giá công bằng và khuyến khích.
-
-### INPUT BẠN NHẬN ĐƯỢC:
-1. **solution_text**: Hướng logic giải chuẩn của câu hỏi
-2. **final_answer**: Đáp án chính xác cuối cùng  
-3. **reasoning_approach**: Barem chấm điểm - các tiêu chí đánh giá
-4. **student_answer**: Bài làm thực tế của học sinh
-
-### NHIỆM VỤ PHÂN TÍCH:
-
-#### A) **Lỗ hổng kiến thức** (knowledge_gaps):
-- Xác định kiến thức nào học sinh chưa nắm vững THỰC SỰ
-- VD: "Chưa biết điều kiện xác định phân thức", "Không hiểu định lý Pythagore"
-- CHỈ liệt kê khi học sinh THỰC SỰ THIẾU kiến thức, không phải khác cách làm
-- Mỗi mục ≤ 20 từ, tối đa 5 mục
-
-#### B) **Lỗi tính toán & logic** (calculation_logic_errors):
-- Những sai sót THỰC SỰ NGHIÊM TRỌNG trong quá trình giải
-- VD: "Tính sai (-3)² = -9", "Quên đổi dấu khi chuyển vế", "Kết luận sai từ điều kiện đúng"
-- CHỈ ghi những lỗi THỰC SỰ SAI, không phải cách làm khác
-- Mỗi mục ≤ 25 từ, tối đa 5 mục
-
-#### C) **Nhận xét tổng quan** (llm_feedback):
-- Đánh giá ngắn gọn bài làm (60-100 từ)
-- Tập trung vào điểm cần cải thiện thực sự
-- Khuyến khích những điểm làm đúng
-
-#### D) **Đánh giá kết quả** (is_correct):
-- `true`: Kết quả cuối ĐÚNG + Logic tổng thể HỢP LÝ (có thể khác barem nhưng không sai)
-- `false`: Kết quả SAI hoặc Logic có vấn đề NGHIÊM TRỌNG
-
-### QUY TẮC CHẤM LINH HOẠT VÀ CÔNG BẰNG:
-- **Ưu tiên kết quả đúng**: Nếu đáp án đúng + cách làm hợp lý → `true`
-- **Chấp nhận cách khác**: Phương pháp khác barem nhưng đúng logic → `true`
-- **Chỉ chấm sai khi**: Kết quả sai, tính toán sai, logic có lỗi nghiêm trọng
-- **Không bắt bẻ**: Thiếu bước nhỏ nhưng không ảnh hưởng kết quả → vẫn `true`
-
-### NGUYÊN TẮC SO SÁNH KHUYẾN KHÍCH:
-- **final_answer** là tiêu chí chính - đúng đáp án là quan trọng nhất
-- **reasoning_approach** chỉ là tham khảo, không bắt buộc theo từng bước
-- **solution_text** để hiểu logic, nhưng chấp nhận logic khác nếu đúng
-- **Khuyến khích tư duy sáng tạo** của học sinh
-
-### OUTPUT FORMAT:
-Chỉ trả về JSON nghiêm ngặt theo schema, không thêm text nào khác.
-
-"""
-
-# JSON Schema for OpenAI
-GRADING_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "knowledge_gaps": {
-            "type": "array", 
-            "items": {"type": "string"},
-            "description": "Các lỗ hổng kiến thức cụ thể"
-        },
-        "calculation_logic_errors": {
-            "type": "array",
-            "items": {"type": "string"}, 
-            "description": "Lỗi tính toán và logic cụ thể"
-        },
-        "llm_feedback": {
-            "type": "string",
-            "description": "Nhận xét chi tiết 120-180 từ"
-        },
-        "is_correct": {
-            "type": "boolean",
-            "description": "true nếu hoàn toàn đúng, false nếu có lỗi"
-        }
-    },
-    "required": ["knowledge_gaps", "calculation_logic_errors", "llm_feedback", "is_correct"]
-}
 
 # =====================
 # Client bootstrap
@@ -109,19 +27,8 @@ _client = OpenAI(api_key=_api_key)
 
 
 # =====================
-# Data structures
+# Data structures imported from utils/data_models.py
 # =====================
-@dataclass
-class GradingResult:
-    submission_id: int
-    question_id: int
-    order_index: int
-    part_label: str
-    knowledge_gaps: List[str]
-    calculation_logic_errors: List[str]
-    llm_feedback: str
-    is_correct: bool
-
 
 # =====================
 # Public API
@@ -150,7 +57,7 @@ def _call_grading_ai(payload: Dict) -> Dict[str, Any]:
         f"**ĐÁP ÁN CHUẨN:**\n{payload['final_answer']}\n\n"
         f"**BAREM CHẤM ĐIỂM:**\n{payload['reasoning_approach']}\n\n"
         f"**BÀI LÀM HỌC SINH:**\n{payload['student_answer']}\n\n"
-        "Hãy phân tích và đánh giá theo 3 yếu tố đã nêu trong system prompt."
+        "Hãy phân tích và đánh giá theo 5 yếu tố đã nêu trong system prompt."
     )
     
     try:
@@ -160,7 +67,7 @@ def _call_grading_ai(payload: Dict) -> Dict[str, Any]:
                 {"role": "system", "content": GRADING_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content}
             ],
-            temperature=TEMPERATURE,
+            temperature=GRADING_TEMPERATURE,
             response_format={
                 "type": "json_schema", 
                 "json_schema": {
@@ -177,7 +84,8 @@ def _call_grading_ai(payload: Dict) -> Dict[str, Any]:
         return {
             "knowledge_gaps": ["Không thể phân tích do lỗi hệ thống"],
             "calculation_logic_errors": [],
-            "llm_feedback": f"Lỗi khi chấm bài: {str(e)}",
+            "knowledge_gap_tag": ["hệ thống"],
+            "error_tag": ["lỗi hệ thống"],
             "is_correct": False
         }
 
@@ -222,7 +130,8 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
                 q.id, 
                 grading_data["knowledge_gaps"],
                 grading_data["calculation_logic_errors"], 
-                grading_data["llm_feedback"],
+                grading_data["knowledge_gap_tag"],
+                grading_data["error_tag"],
                 grading_data["is_correct"]
             )
             
@@ -234,7 +143,8 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
                     part_label=(getattr(q, "part_label", None) or ""),
                     knowledge_gaps=grading_data["knowledge_gaps"],
                     calculation_logic_errors=grading_data["calculation_logic_errors"],
-                    llm_feedback=grading_data["llm_feedback"],
+                    knowledge_gap_tag=grading_data["knowledge_gap_tag"],
+                    error_tag=grading_data["error_tag"],
                     is_correct=grading_data["is_correct"],
                 )
             )
@@ -266,7 +176,6 @@ def build_final_report(submission_id: int) -> str:
             "question_text": (q.question_text or "")[:CTX_MAX_CHARS_QUESTION],
             "knowledge_gaps": _safe_json_loads(g.knowledge_gaps) or [],
             "calculation_logic_errors": _safe_json_loads(g.calculation_logic_errors) or [],
-            "llm_feedback": (g.llm_feedback or ""),
             "is_correct": bool(g.is_correct),
         })
 
@@ -412,7 +321,7 @@ def _call_llm_json_with_openai(payload: Dict, reasoning_effort: str) -> Dict:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
-            temperature=TEMPERATURE,
+            temperature=GRADING_TEMPERATURE,
             response_format={
                 "type": "json_schema", 
                 "json_schema": {
@@ -431,9 +340,12 @@ def _call_llm_json_with_openai(payload: Dict, reasoning_effort: str) -> Dict:
 
 
 def _save_grading_new(submission_id: int, question_id: int, knowledge_gaps: List[str], 
-                     calculation_logic_errors: List[str], llm_feedback: str, is_correct: bool):
+                     calculation_logic_errors: List[str], knowledge_gap_tag: List[str], 
+                     error_tag: List[str], is_correct: bool):
     knowledge_gaps_json = json.dumps(knowledge_gaps, ensure_ascii=False)
     calculation_errors_json = json.dumps(calculation_logic_errors, ensure_ascii=False)
+    knowledge_gap_tag_json = json.dumps(knowledge_gap_tag, ensure_ascii=False)
+    error_tag_json = json.dumps(error_tag, ensure_ascii=False)
     
     with db.get_session() as session:
         row = (
@@ -447,7 +359,8 @@ def _save_grading_new(submission_id: int, question_id: int, knowledge_gaps: List
                 question_id=question_id,
                 knowledge_gaps=knowledge_gaps_json,
                 calculation_logic_errors=calculation_errors_json,
-                llm_feedback=llm_feedback,
+                knowledge_gap_tag=knowledge_gap_tag_json,
+                error_tag=error_tag_json,
                 is_correct=1 if is_correct else 0,
                 final_score=None,
             )
@@ -455,7 +368,8 @@ def _save_grading_new(submission_id: int, question_id: int, knowledge_gaps: List
         else:
             row.knowledge_gaps = knowledge_gaps_json
             row.calculation_logic_errors = calculation_errors_json
-            row.llm_feedback = llm_feedback
+            row.knowledge_gap_tag = knowledge_gap_tag_json
+            row.error_tag = error_tag_json
             row.is_correct = 1 if is_correct else 0
             row.final_score = None
         session.commit()
@@ -466,12 +380,8 @@ def _create_missing_grading(question: Question, submission_id: int):
     # Parse knowledge_topics từ question (JSON string)
     knowledge_topics = _safe_json_loads(question.knowledge_topics)
     
-    # Tạo feedback message
-    if knowledge_topics:
-        topics_str = ", ".join(knowledge_topics)
-        feedback = f"Học sinh không làm câu này. Cần ôn tập: {topics_str}"
-    else:
-        feedback = "Học sinh không làm câu này."
+    # Tạo tags từ knowledge_topics
+    knowledge_gap_tags = [topic.replace(" ", "_").lower() for topic in knowledge_topics[:3]]
     
     # Lưu grading record với knowledge_gaps = knowledge_topics
     _save_grading_new(
@@ -479,7 +389,8 @@ def _create_missing_grading(question: Question, submission_id: int):
         question_id=question.id,
         knowledge_gaps=knowledge_topics,  # Sử dụng knowledge_topics từ question
         calculation_logic_errors=[],      # Rỗng vì không có tính toán
-        llm_feedback=feedback,
+        knowledge_gap_tag=knowledge_gap_tags,  # Tags từ knowledge_topics
+        error_tag=["không làm"],          # Tag cho việc không làm bài
         is_correct=False                  # Không đúng vì không làm
     )
 

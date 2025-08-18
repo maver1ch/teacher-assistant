@@ -3,77 +3,19 @@ from __future__ import annotations
 import os
 import json
 from typing import Dict, Any
-from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from utils.prompts import SOLUTION_SYSTEM_PROMPT
+from utils.config import API_KEY_ENV, SOLUTION_MODEL_NAME, SOLUTION_TEMPERATURE
+from utils.schemas import SOLUTION_SCHEMA
+from utils.data_models import SolutionResult
 
 from database.db_manager import db
 from database.models import Question, QuestionSolution
 
-# ---------- Constants
-API_KEY_ENV = "OPENAI_API_KEY"
-MODEL_NAME = "o4-mini"
-TEMPERATURE = 1.0
-
 load_dotenv()
 _client = OpenAI(api_key=os.getenv(API_KEY_ENV))
-
-# ---------- System Prompt
-SOLUTION_SYSTEM_PROMPT = """
-Bạn là giáo viên Toán giàu kinh nghiệm tại Việt Nam, chuyên tạo HƯỚNG LOGIC GIẢI BÀI và BAREM CHẤM ĐIỂM cho các câu hỏi toán học.
-
-### MỤC TIÊU CHÍNH:
-- Tạo **hướng logic giải bài** thay vì giải chi tiết từng bước
-- Xây dựng **quy tắc chấm điểm (barem)** để đánh giá bài làm học sinh
-- Đưa ra **kết quả cuối cùng** chính xác
-
-### QUY TẮC:
-1. **Không giải chi tiết**: Tập trung vào HƯỚNG LOGIC và CÁC BƯỚC QUAN TRỌNG
-2. **Barem rõ ràng**: Nêu các tiêu chí chấm điểm, điều kiện cần có
-3. **Kiến thức cốt lõi**: Xác định các khái niệm, định lý cần vận dụng
-4. **Lỗi thường gặp**: Liệt kê các sai sót học sinh thường mắc phải
-
-### CẤU TRÚC SOLUTION:
-- **Hướng logic**: Các bước tư duy chính để giải quyết bài toán
-- **Barem chấm**: Tiêu chí đánh giá từng bước/ý trong bài làm
-- **Kết quả cuối**: Đáp án chính xác (nếu có)
-
-### DẠNG BÀI THƯỜNG GẶP:
-- **Giải phương trình/hệ/bất phương trình**: Kiểm tra điều kiện, biến đổi đúng, nghiệm hợp lệ
-- **Hàm số/đồ thị**: Tính đúng tọa độ đỉnh, trục đối xứng, giao điểm
-- **Hình học**: Chứng minh có lập luận logic, sử dụng đúng định lý
-- **Bài toán thực tế**: Đặt ẩn đúng, lập phương trình chính xác, kết luận có đơn vị
-
-Trả về JSON nghiêm ngặt theo schema yêu cầu.
-"""
-
-# ---------- JSON Schema
-SOLUTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "solution_text": {"type": "string"},
-        "final_answer": {"type": "string"},
-        "reasoning_approach": {"type": "string"}
-    },
-    "required": ["solution_text", "final_answer", "reasoning_approach"]
-}
-
-@dataclass
-class SolutionResult:
-    order_index: int
-    part_label: str
-    solution_text: str
-    final_answer: str
-    reasoning_approach: str
-
-def _get_reasoning_effort(difficulty: int) -> str:
-    if difficulty < 5:
-        return "low"
-    elif 6 <= difficulty <= 8:
-        return "medium" 
-    else:
-        return "high"
 
 def _get_reasoning_effort(difficulty: int) -> str:
     if difficulty < 5:
@@ -90,9 +32,7 @@ def _generate_solution_with_context(
     """
     Gọi API OpenAI để giải một câu hỏi với context từ các câu hỏi liên quan.
     """
-    reasoning_effort = _get_reasoning_effort(target_question.difficulty)
     
-    # Xây dựng phần context cho prompt
     context_str = ""
     if context_questions:
         context_parts = []
@@ -101,15 +41,14 @@ def _generate_solution_with_context(
             label = f" {q.part_label}" if q.part_label else ""
             context_parts.append(f"Câu {q.order_index}{label}: {q.question_text}")
         
-        # --- ĐÂY LÀ PHẦN ĐÃ SỬA LỖI ---
-        # 1. Join các phần context thành một chuỗi duy nhất trước
         joined_context = "\n".join(context_parts)
         
-        # 2. Sau đó, sử dụng f-string với biến đã được tạo
         context_str = (
             "Để giải câu hỏi này, hãy xem xét bối cảnh từ các câu hỏi liên quan sau:\n"
             "--- BỐI CẢNH BẮT ĐẦU ---\n"
             f"{joined_context}\n"
+            "Nếu như phần bối cảnh có liên quan đến bài hiện tại thì đọc kĩ."
+            "Nếu như các phần trước tách biệt hoàn toàn và không liên quan đến phần này thì bỏ qua phần bối cảnh. Tập trung vào giải phần hiện tại."
             "--- BỐI CẢNH KẾT THÚC ---\n\n"
         )
 
@@ -128,12 +67,12 @@ def _generate_solution_with_context(
     )
     
     resp = _client.chat.completions.create(
-        model=MODEL_NAME,
+        model=SOLUTION_MODEL_NAME,
         messages=[
             {"role": "system", "content": SOLUTION_SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
         ],
-        temperature=TEMPERATURE,
+        temperature=SOLUTION_TEMPERATURE,
         response_format={
             "type": "json_schema",
             "json_schema": {
@@ -154,8 +93,6 @@ def _generate_solution_with_context(
         reasoning_approach=data["reasoning_approach"]
     )
 
-# THAY ĐỔI 2: Cập nhật hàm `create_and_save_solution` để xây dựng context.
-# Đây là nơi logic chính được thực hiện.
 def create_and_save_solution(question_id: int) -> int:
     with db.get_session() as session:
         # 1. Lấy câu hỏi mục tiêu
