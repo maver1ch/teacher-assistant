@@ -61,32 +61,21 @@ GRADING_SCHEMA = {
             "items": {"type": "string"}, 
             "description": "Lỗi tính toán và logic cụ thể"
         },
-        "knowledge_gap_tag": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Tag keyword cho lỗ hổng kiến thức"
-        },
-        "error_tag": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Tag keyword cho lỗi sai"
-        },
         "is_correct": {
             "type": "boolean",
-            "description": "true nếu hoàn toàn đúng, false nếu có lỗi"
+            "description": "True nếu đưa án đúng cùng lời giải hợp lí, false nếu sai đáp án hoặc lời giải có phần logic nghiêm trọng, lí luận bất hợp lí."
         }
     },
-    "required": ["knowledge_gaps", "calculation_logic_errors", "knowledge_gap_tag", "error_tag", "is_correct"]
+    "required": ["knowledge_gaps", "calculation_logic_errors", "is_correct"]
 }
 
 # Schema for solution generation (from solution_service.py)
 SOLUTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "solution_text": {"type": "string"},
         "final_answer": {"type": "string"},
         "reasoning_approach": {"type": "string"},
         "difficulty": {"type": "integer", "minimum": 1, "maximum": 10}
     },
-    "required": ["solution_text", "final_answer", "reasoning_approach", "difficulty"]
+    "required": ["final_answer", "reasoning_approach", "difficulty"]
 }

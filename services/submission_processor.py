@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from utils.config import API_KEY_ENV, SEGMENT_MODEL, LLM_TEMPERATURE
 from utils.schemas import SEGMENT_SCHEMA
+from utils.llm_logger import log_llm_call
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -22,19 +23,19 @@ _client = OpenAI(api_key=os.getenv(API_KEY_ENV))
 
 # System prompt cho phân đoạn bài làm
 SYSTEM_PROMPT_SEGMENT = """
-Bạn là AI chuyên trích xuất nội dung bài làm học sinh từ skeleton có sẵn.
+Bạn là AI chuyên gia trích xuất nội dung bài làm học sinh từ skeleton có sẵn.
 
 NHIỆM VỤ
-- Nhận vào: (1) SKELETON có sẵn order_index/part_label/question_id và (2) toàn văn bài làm
+- Nhận vào: (1) SKELETON có sẵn order_index/part_label/question_id và (2) toàn văn bài làm dưới dạng hình ảnh.
 - Chỉ tìm và điền answer_text cho từng item trong skeleton
 - KHÔNG thay đổi order_index, part_label, question_id, position
 
 QUY TẮC QUAN TRỌNG
-1) Với mỗi item trong skeleton, tìm phần trả lời tương ứng trong bài làm
-2) Kết hợp Dùng ngữ nghĩa (từ khóa, kiến thức) để khớp + ký hiệu đánh số để xác định (Ví dụ Bài 1.a, Bài 2.3 hoặc Bài 4.1.a, ...)
-3) Nếu tìm thấy → điền vào answer_text (giữ nguyên LaTeX $/$$)
-4) Nếu KHÔNG tìm thấy (học sinh không làm ý đó) → để answer_text = ""
-5) KHÔNG tạo item mới, KHÔNG xóa item khỏi skeleton
+1) Với mỗi item trong skeleton, tìm phần trả lời tương ứng trong hình ảnh.
+2) Kết hợp Dùng ngữ nghĩa (từ khóa, kiến thức) để khớp + trình tự các bài + ký hiệu đánh số để xác định (Ví dụ Bài 1.a, Bài 2.3 hoặc Bài 4.1.a, ...)
+3) Trong bài làm sẽ có những phần không liên quan đến bài (phần gạch xóa, vẽ hình ảnh) => Không diễn giải và xử lí phần đó.
+4) Nếu tìm thấy → điền vào answer_text (**BẢO TOÀN LATEX**: Giữ nguyên mọi công thức toán học trong cặp dấu `$`...`$` (inline) và `$$`...`$$` (display). KHÔNG được xóa các dấu `$` này.)
+5) Nếu KHÔNG tìm thấy (học sinh không làm ý đó) → để answer_text = ""
 6) Cho phép gộp nhiều đoạn của cùng câu thành chuỗi liên tục
 
 LƯỢC ĐỒ JSON (STRICT)
@@ -43,9 +44,9 @@ LƯỢC ĐỒ JSON (STRICT)
 - Kết quả: {"items": [skeleton đã điền answer_text]}
 
 IMPORTANT NOTE: OUTPUT luôn luôn là tiếng Việt (Ví dụ Vi-ét không phải Viéte)
-VÍ DỤ:
-Input skeleton: [{"question_id": 1, "order_index": 1, "part_label": "a", "position": 1, "answer_text": ""}]
-Output: {"items": [{"question_id": 1, "order_index": 1, "part_label": "a", "position": 1, "answer_text": "x = 5 vì..."}]}
+
+VÍ DỤ mẫu:
+Output: {"items": [{"question_id": 1, "order_index": 1, "part_label": "a", "position": 1, "answer_text": "x = 5 vì x + 2 = 7, ..."}]}
 """
 
 def create_submission_skeleton(questions: List) -> List[Dict[str, Any]]:
@@ -61,73 +62,7 @@ def create_submission_skeleton(questions: List) -> List[Dict[str, Any]]:
         })
     return skeleton
 
-def segment_submission(questions: List, submission_text: str) -> Dict[str, Any]:
-    """Phân đoạn bài làm từ text (legacy function)"""
-    logger.info("=== SEGMENT SUBMISSION START ===")
-    
-    if not submission_text or not submission_text.strip():
-        logger.warning("Submission text is empty. Returning empty segment list.")
-        return {"items": []}
-
-    # Create skeleton with pre-populated structure
-    skeleton = create_submission_skeleton(questions)
-    
-    logger.info(f"Created skeleton with {len(skeleton)} items")
-    
-    user_msg = (
-        "Dưới đây là (1) SKELETON có sẵn cấu trúc và (2) toàn văn bài làm. "
-        "Hãy điền answer_text cho từng item trong skeleton và trả về JSON. Nếu như không tìm được câu tương ứng (tức là học sinh không làm bài thì phần answer_text để rỗng). \n\n"
-        f"(1) SKELETON:\n{json.dumps(skeleton, ensure_ascii=False)}\n\n"
-        "(2) SUBMISSION:\n" + submission_text.strip()
-    )
-            
-    raw_content = ""
-    try:
-        resp = _client.chat.completions.create(
-            model=SEGMENT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_SEGMENT},
-                {"role": "user", "content": user_msg}
-            ],
-            max_tokens=10000,
-            temperature=LLM_TEMPERATURE,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "submission_segmentation",
-                    "schema": SEGMENT_SCHEMA
-                }
-            }
-        )
-        
-        raw_content = resp.choices[0].message.content
-        logger.info(f"API response for segmentation received. Length: {len(raw_content)} chars.")
-        
-        if not raw_content or not raw_content.strip():
-            logger.warning("API returned an empty string, possibly due to content filtering. Returning a valid empty dict.")
-            return {"items": []}
-            
-        return json.loads(raw_content)
-
-    except json.JSONDecodeError as e:
-        logger.error(f"JSONDecodeError during segmentation: {e}")
-        logger.error(f"Raw content that caused the error: {raw_content}")
-        return {"items": []}
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during segmentation API call: {e}")
-        return {"items": []}
-
 def segment_submission_from_images(questions: List, image_paths: List[str]) -> Dict[str, Any]:
-    """
-    Phân đoạn bài làm học sinh từ hình ảnh sử dụng GPT-4.1-mini vision model.
-    
-    Args:
-        questions: List các Question objects từ database
-        image_paths: List đường dẫn đến các file ảnh
-        
-    Returns:
-        Dict với key "items" chứa list các segmented items
-    """
     logger.info("=== SEGMENT SUBMISSION FROM IMAGES START ===")
     
     if not image_paths:
@@ -162,7 +97,7 @@ def segment_submission_from_images(questions: List, image_paths: List[str]) -> D
                 "Dưới đây là (1) SKELETON có sẵn cấu trúc và (2) hình ảnh bài làm học sinh. "
                 "Hãy phân tích hình ảnh, trích xuất nội dung bài làm, sau đó điền answer_text cho từng item trong skeleton và trả về JSON. "
                 "Nếu như không tìm được câu tương ứng (tức là học sinh không làm bài thì phần answer_text để rỗng). "
-                "Giữ nguyên LaTeX format (sử dụng $ và $$).\n\n"
+                "**QUAN TRỌNG: Phải giữ nguyên mọi định dạng LaTeX (sử dụng $ và $$). Không được xóa hoặc thay đổi các ký tự này.**\n\n"
                 f"(1) SKELETON:\n{json.dumps(skeleton, ensure_ascii=False)}"
             )
         }
@@ -192,7 +127,7 @@ def segment_submission_from_images(questions: List, image_paths: List[str]) -> D
                 "type": "json_object"
             }
         )
-
+        log_llm_call(response=resp, model_name=SEGMENT_MODEL, service_name="submission_segmentation_vision")
         raw_content = resp.choices[0].message.content.strip()
         logger.info(f"Raw API response: {raw_content[:200]}...")
 

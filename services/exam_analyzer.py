@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from utils.config import API_KEY_ENV, EXAM_ANALYZER_MODEL, LLM_TEMPERATURE
 from utils.schemas import ANALYZE_SCHEMA
+from utils.llm_logger import log_llm_call
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ def analyze_exam_from_images(image_paths: List[str]) -> List[Dict[str, Any]]:
                 }
             }
         )
-        
+        log_llm_call(response=resp, model_name=EXAM_ANALYZER_MODEL, service_name="exam_analysis")
         logger.info(f"API Response received")
         if hasattr(resp, 'usage') and resp.usage:
             logger.info(f"Token usage: {resp.usage}")

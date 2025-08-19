@@ -23,16 +23,11 @@ class GradingResult:
     part_label: str
     knowledge_gaps: List[str]
     calculation_logic_errors: List[str]
-    knowledge_gap_tag: List[str]
-    error_tag: List[str]
     is_correct: bool
 
 # Data model for solution results (from solution_service.py)
 @dataclass
 class SolutionResult:
-    order_index: int
-    part_label: str
-    solution_text: str
     final_answer: str
     reasoning_approach: str
     difficulty: int

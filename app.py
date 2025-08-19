@@ -424,7 +424,7 @@ if ss.current_step == 1:
                 ]
                 
                 if ss.parsed_questions:
-                    exam_id = db.create_exam(exam_name, "")  # No OCR text stored
+                    exam_id = db.create_exam(exam_name)  # No OCR text stored
                     ss.exam_id = exam_id
                     st.success(f"✅ Phân tích hoàn thành: {len(ss.parsed_questions)} câu hỏi.")
                 else:
@@ -566,9 +566,6 @@ elif ss.current_step == 3 and ss.exam_id:
             existing_solution = get_solution_by_question(selected_question.id)
             if existing_solution:
                 st.markdown(f"**Lời giải câu {existing_solution['order_index']}{existing_solution['part_label'] or ''}:**")
-                
-                with st.expander("📝 Hướng logic giải", expanded=True):
-                    display_math_text(existing_solution["solution_text"], max_height=200)
                 
                 with st.expander("🎯 Đáp án cuối"):
                     display_math_text(existing_solution["final_answer"], max_height=150)
@@ -841,49 +838,83 @@ elif ss.current_step == 5 and ss.exam_id:
         if st.button("🧮 Chấm toàn bộ bài (So sánh với lời giải chuẩn)", use_container_width=True):
             with st.spinner("Đang chấm bài với AI..."):
                 results = grade_submission(int(ss.submission_id))
+            
             if results:
                 st.subheader("📊 Kết quả chấm chi tiết")
                 
+                # Lấy tất cả câu trả lời của học sinh để hiển thị
+                submission_items = db.get_submission_items(int(ss.submission_id))
+                answers_map = {item.question_id: item.answer_text for item in submission_items}
+
                 # Tổng quan kết quả
                 correct_count = sum(1 for r in results if r.is_correct)
                 total_count = len(results)
                 st.metric("Tổng quan", f"{correct_count}/{total_count} câu đúng", 
                          f"{correct_count/total_count*100:.1f}%" if total_count > 0 else "0%")
                 
-                # Hiển thị từng câu
+                # Lấy thông tin barem chấm điểm từ database
+                from services.solution_service import get_solution_by_question
+                solutions_map = {}
                 for r in results:
-                    status_icon = "✅" if r.is_correct else "❌"
-                    with st.expander(f"{status_icon} Câu {r.order_index}{r.part_label} - {'ĐÚNG' if r.is_correct else 'SAI'}"):
-                        
-                        col1, col2 = st.columns([1, 1])
-                        
-                        with col1:
-                            st.markdown("**🧠 Lỗ hổng kiến thức:**")
-                            if r.knowledge_gaps:
-                                for gap in r.knowledge_gaps:
-                                    st.write(f"• {gap}")
-                            else:
-                                st.write("✅ Không có lỗ hổng kiến thức")
-                            
-                            st.markdown("**🏷️ Tags kiến thức:**")
-                            if r.knowledge_gap_tag:
-                                st.write(", ".join(r.knowledge_gap_tag))
-                            else:
-                                st.write("Không có tag")
-                        
-                        with col2:
-                            st.markdown("**⚠️ Lỗi tính toán & logic:**")
-                            if r.calculation_logic_errors:
-                                for error in r.calculation_logic_errors:
-                                    st.write(f"• {error}")
-                            else:
-                                st.write("✅ Không có lỗi tính toán/logic")
-                            
-                            st.markdown("**🏷️ Tags lỗi:**")
-                            if r.error_tag:
-                                st.write(", ".join(r.error_tag))
-                            else:
-                                st.write("Không có tag")
+                    solution = get_solution_by_question(r.question_id)
+                    if solution:
+                        solutions_map[r.question_id] = solution["reasoning_approach"]
+                    else:
+                        solutions_map[r.question_id] = "Chưa có barem chấm"
+                
+                # Tạo bảng dữ liệu full màn hình
+                table_data = []
+                for r in results:
+                    student_answer = answers_map.get(r.question_id, "Không làm")
+                    status = "✅ ĐÚNG" if r.is_correct else "❌ SAI"
+                    reasoning_approach = solutions_map.get(r.question_id, "Chưa có barem chấm")
+                    
+                    # Format knowledge gaps và errors
+                    knowledge_gaps_text = "\n".join([f"• {gap}" for gap in r.knowledge_gaps]) if r.knowledge_gaps else "Không có"
+                    errors_text = "\n".join([f"• {error}" for error in r.calculation_logic_errors]) if r.calculation_logic_errors else "Không có"
+                    
+                    table_data.append({
+                        "Câu": f"{r.order_index}{r.part_label}",
+                        "Barem chấm điểm": reasoning_approach,
+                        "Kết quả": status,
+                        "Bài làm học sinh": student_answer,
+                        "Lỗ hổng kiến thức": knowledge_gaps_text,
+                        "Lỗi tính toán/logic": errors_text
+                    })
+                
+                # Hiển thị bảng full width
+                import pandas as pd
+                df_results = pd.DataFrame(table_data)
+                
+                # Header với nút download
+                col_title, col_download = st.columns([3, 1])
+                with col_title:
+                    st.subheader("📋 Bảng kết quả tổng hợp")
+                with col_download:
+                    # Tạo CSV data để download
+                    csv_data = df_results.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="⬇️ Tải CSV",
+                        data=csv_data,
+                        file_name=f"grading_results_{ss.submission_id}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                st.dataframe(
+                    df_results,
+                    use_container_width=True,
+                    height=600,
+                    column_config={
+                        "Câu": st.column_config.TextColumn("Câu", width="small"),
+                        "Barem chấm điểm": st.column_config.TextColumn("Barem chấm điểm", width="large"),
+                        "Kết quả": st.column_config.TextColumn("Kết quả", width="small"),
+                        "Bài làm học sinh": st.column_config.TextColumn("Bài làm học sinh", width="large"),
+                        "Lỗ hổng kiến thức": st.column_config.TextColumn("Lỗ hổng kiến thức", width="medium"),
+                        "Lỗi tính toán/logic": st.column_config.TextColumn("Lỗi tính toán/logic", width="medium")
+                    }
+                )
+
             else:
                 st.info("Không có mục nào để chấm hoặc submission_id không hợp lệ.")
 
@@ -905,7 +936,7 @@ elif ss.current_step == 5 and ss.exam_id:
                             st.rerun()
             with col2:
                 st.download_button(
-                    "⬇️ Tải báo cáo (.md)",
+                    "⬇️ Tải MD",
                     data=saved_report.report_content,
                     file_name=f"grading_report_{int(ss.submission_id)}.md",
                     mime="text/markdown",

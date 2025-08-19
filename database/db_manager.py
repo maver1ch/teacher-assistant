@@ -32,9 +32,9 @@ class DatabaseManager:
         return self.SessionLocal()
 
     # --- Minimal helpers (keep API small)
-    def create_exam(self, name: str, original_text: str = None) -> int:
+    def create_exam(self, name: str) -> int:
         with self.get_session() as session:
-            exam = Exam(name=name, original_text=original_text)
+            exam = Exam(name=name)
             session.add(exam)
             session.commit()
             return exam.id
@@ -68,15 +68,17 @@ class DatabaseManager:
         """Run any needed database schema migrations"""
         try:
             with self.engine.begin() as conn:  # Use begin() for auto-commit
-                # Migration 1: Add original_text column to exams table if it doesn't exist
+                # Migration 1: Remove original_text column from exams table if it exists
                 try:
                     # Test if column exists by trying to select it
                     conn.execute("SELECT original_text FROM exams LIMIT 1")
+                    # Column exists, drop it
+                    print("Dropping original_text column from exams table...")
+                    conn.execute("ALTER TABLE exams DROP COLUMN original_text")
+                    print("Migration completed: original_text column removed from exams")
                 except Exception:
-                    # Column doesn't exist, add it
-                    print("Adding original_text column to exams table...")
-                    conn.execute("ALTER TABLE exams ADD COLUMN original_text TEXT")
-                    print("Migration completed: original_text column added to exams")
+                    # Column doesn't exist, continue
+                    pass
                 
                 # Migration 2: Check if submission_reports table exists
                 try:
@@ -107,13 +109,10 @@ class DatabaseManager:
     def get_latest_report(self, submission_id: int):
         return self.get_submission_report(submission_id)
 
-    def create_solution(self, question_id: int, order_index: int, part_label: str, solution_text: str, final_answer: str, reasoning_approach: str) -> int:
+    def create_solution(self, question_id: int, final_answer: str, reasoning_approach: str) -> int:
         with self.get_session() as session:
             solution = QuestionSolution(
                 question_id=question_id,
-                order_index=order_index,
-                part_label=part_label,
-                solution_text=solution_text,
                 final_answer=final_answer,
                 reasoning_approach=reasoning_approach
             )
@@ -127,13 +126,10 @@ class DatabaseManager:
                 QuestionSolution.question_id == question_id
             ).first()
 
-    def update_solution(self, solution_id: int, order_index: int, part_label: str, solution_text: str, final_answer: str, reasoning_approach: str):
+    def update_solution(self, solution_id: int, final_answer: str, reasoning_approach: str):
         with self.get_session() as session:
             solution = session.query(QuestionSolution).filter(QuestionSolution.id == solution_id).first()
             if solution:
-                solution.order_index = order_index
-                solution.part_label = part_label
-                solution.solution_text = solution_text
                 solution.final_answer = final_answer
                 solution.reasoning_approach = reasoning_approach
                 session.commit()
@@ -173,9 +169,6 @@ class DatabaseManager:
         return {
             "id": solution.id,
             "question_id": solution.question_id,
-            "order_index": solution.order_index,
-            "part_label": solution.part_label,
-            "solution_preview": format_latex_preview(solution.solution_text, 150),
             "final_answer_preview": format_latex_preview(solution.final_answer, 80),
             "reasoning_preview": format_latex_preview(solution.reasoning_approach, 120),
             "created_at": solution.created_at

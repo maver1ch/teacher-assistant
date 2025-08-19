@@ -5,12 +5,15 @@ from datetime import datetime
 
 Base = declarative_base()
 
+def datetime_now_seconds():
+    """Return current datetime truncated to seconds (no microseconds)"""
+    return datetime.now().replace(microsecond=0)
+
 class Exam(Base):
     __tablename__ = "exams"
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False)
-    original_text = Column(Text)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime_now_seconds)
 
     questions = relationship("Question", back_populates="exam", cascade="all, delete-orphan")
     submissions = relationship("Submission", back_populates="exam", cascade="all, delete-orphan")
@@ -36,7 +39,7 @@ class Submission(Base):
     exam_id = Column(Integer, ForeignKey("exams.id"), nullable=False)
     student_name = Column(String(255), nullable=False)
     original_text = Column(Text)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime_now_seconds)
 
     exam = relationship("Exam", back_populates="submissions")
     gradings = relationship("Grading", back_populates="submission", cascade="all, delete-orphan")
@@ -60,10 +63,9 @@ class QuestionSolution(Base):
     __tablename__ = "question_solutions"
     id = Column(Integer, primary_key=True)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
-    solution_text = Column(Text, nullable=False)
     final_answer = Column(Text)
     reasoning_approach = Column(Text)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime_now_seconds)
 
     question = relationship("Question", back_populates="solution")
 
@@ -73,17 +75,15 @@ class Grading(Base):
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
     
-    # 4 yếu tố phân tích mới
+    # Phân tích kết quả chấm bài
     knowledge_gaps = Column(Text)           # Lỗ hổng kiến thức (JSON array)
     calculation_logic_errors = Column(Text) # Lỗi tính toán/logic (JSON array)
-    knowledge_gap_tag = Column(Text)        # Tag keyword cho lỗ hổng kiến thức (JSON array)
-    error_tag = Column(Text)                # Tag keyword cho lỗi sai (JSON array)
     
     # Đánh giá kết quả
     is_correct = Column(Integer, default=0) # 0=False, 1=True - đúng/sai
     final_score = Column(Float)             # Điểm số (nếu cần)
     
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime_now_seconds)
 
     submission = relationship("Submission", back_populates="gradings")
     question = relationship("Question", back_populates="gradings")
@@ -93,6 +93,6 @@ class SubmissionReport(Base):
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     report_content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime_now_seconds)
     
     submission = relationship("Submission", back_populates="reports")

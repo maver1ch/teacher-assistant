@@ -4,3 +4,6 @@
 **.png
 **/James/** 
 **.md
+delete_gradings.py 
+export_gradings.py 
+**/logs/**

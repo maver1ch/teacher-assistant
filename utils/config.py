@@ -14,11 +14,11 @@ EXAM_ANALYZER_MODEL = "gpt-4.1-mini"
 SEGMENT_MODEL = "gpt-4.1-mini"
 
 # Grading Service Models  
-MODEL_GRADING = "gpt-4.1-mini-2025-04-14"
-COMMENT_MODEL = "gpt-4o-mini"
+MODEL_GRADING = "gpt-4.1-mini"
+MODEL_GRADING_ADVANCED = "gpt-5-mini"
 
 # Solution Service Model
-SOLUTION_MODEL_NAME = "o4-mini"
+SOLUTION_MODEL_NAME = "gpt-5-mini"
 
 # ==================== TEMPERATURE SETTINGS ====================
 LLM_TEMPERATURE = 0.1
@@ -30,3 +30,10 @@ CTX_MAX_CHARS_ANSWER = 800
 
 # ==================== DATABASE CONFIGURATION ====================
 DATABASE_PATH = "data/database.db"
+
+MODEL_PRICING = {
+    # gpt-4o-mini and its variants
+    "gpt-4.1-mini":           {"input": 0.4, "output": 1.60},
+    "gpt-5-mini":                {"input": 0.5, "output": 2.00},
+    "gpt-4o-mini":            {"input": 0.15, "output": 0.60},
+}

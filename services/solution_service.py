@@ -16,6 +16,7 @@ from utils.data_models import SolutionResult
 
 from database.db_manager import db
 from database.models import Question, QuestionSolution
+from utils.llm_logger import log_llm_call
 
 load_dotenv()
 _client = OpenAI(api_key=os.getenv(API_KEY_ENV))
@@ -54,11 +55,10 @@ def _generate_solution_with_context(
         "hãy tạo hướng logic giải bài và phương pháp đánh giá:\n\n"
         f"**Câu hỏi cần giải**: {target_question.question_text}\n"
         f"**Kiến thức liên quan**: {target_question.knowledge_topics}\n\n"
-        "Trả về JSON với 4 trường:\n"
-        "- solution_text: Hướng logic giải (không chi tiết từng bước)\n"
+        "Trả về JSON với 3 trường:\n"
         "- final_answer: Kết quả cuối cùng\n"
         "- reasoning_approach: Phương pháp đánh giá (các ý logic)\n"
-        "- difficulty: Độ khó câu hỏi từ 1-10"
+        "- difficulty: Độ khó câu hỏi từ 1-10 đối với học sinh lớp 9"
     )
     
     resp = _client.chat.completions.create(
@@ -76,13 +76,10 @@ def _generate_solution_with_context(
         },
         # reasoning_effort=reasoning_effort # Tham số này không tồn tại, giữ ở dạng comment
     )
-    
+    log_llm_call(response=resp, model_name=SOLUTION_MODEL_NAME, service_name="solution_generation")
     data = json.loads(resp.choices[0].message.content)
     
     return SolutionResult(
-        order_index=target_question.order_index,
-        part_label=target_question.part_label or "",
-        solution_text=data["solution_text"],
         final_answer=data["final_answer"], 
         reasoning_approach=data["reasoning_approach"],
         difficulty=data["difficulty"]
@@ -121,7 +118,6 @@ def create_and_save_solution(question_id: int) -> int:
         ).first()
         
         if existing:
-            existing.solution_text = solution_result.solution_text
             existing.final_answer = solution_result.final_answer
             existing.reasoning_approach = solution_result.reasoning_approach
             session.commit()
@@ -129,7 +125,6 @@ def create_and_save_solution(question_id: int) -> int:
         else:
             solution = QuestionSolution(
                 question_id=question_id,
-                solution_text=solution_result.solution_text,
                 final_answer=solution_result.final_answer,
                 reasoning_approach=solution_result.reasoning_approach
             )
@@ -153,7 +148,6 @@ def get_solution_by_question(question_id: int) -> Dict[str, Any]:
             "question_id": solution.question_id,
             "order_index": solution.question.order_index, 
             "part_label": solution.question.part_label,   
-            "solution_text": solution.solution_text,
             "final_answer": solution.final_answer,
             "reasoning_approach": solution.reasoning_approach,
             "created_at": solution.created_at
