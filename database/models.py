@@ -45,6 +45,7 @@ class Submission(Base):
     gradings = relationship("Grading", back_populates="submission", cascade="all, delete-orphan")
     items = relationship("SubmissionItem", back_populates="submission", cascade="all, delete-orphan")
     reports = relationship("SubmissionReport", back_populates="submission", cascade="all, delete-orphan")
+    performance_analyses = relationship("PerformanceAnalysis", back_populates="submission", cascade="all, delete-orphan")
 
 class SubmissionItem(Base):
     __tablename__ = "submission_items"
@@ -74,7 +75,7 @@ class Grading(Base):
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
-    
+    question_label = Column(String(32))  
     # Phân tích kết quả chấm bài
     knowledge_gaps = Column(Text)           # Lỗ hổng kiến thức (JSON array)
     calculation_logic_errors = Column(Text) # Lỗi tính toán/logic (JSON array)
@@ -96,3 +97,15 @@ class SubmissionReport(Base):
     created_at = Column(DateTime, default=datetime_now_seconds)
     
     submission = relationship("Submission", back_populates="reports")
+
+class PerformanceAnalysis(Base):
+    __tablename__ = "performance_analyses"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
+    group_name = Column(String(255), nullable=False)
+    group_type = Column(String(32), nullable=False)  # "knowledge" hoặc "error"
+    description = Column(Text, nullable=False)
+    related_questions = Column(Text, default="[]")  # JSON array of question_labels
+    created_at = Column(DateTime, default=datetime_now_seconds)
+    
+    submission = relationship("Submission", back_populates="performance_analyses")

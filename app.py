@@ -16,11 +16,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- Services & DB
+from services.performance_analyzer import analyze_submission_performance
 from services.exam_analyzer import analyze_exam_from_images
 from services.submission_processor import segment_submission_from_images
 from database.db_manager import db
-from database.models import Exam, Submission, Question, SubmissionItem
-from services.grading_service import grade_submission, build_final_report, get_or_generate_report
+from database.models import Exam, Submission, Question, SubmissionItem, Grading
+from services.grading_service import grade_submission, build_final_report, get_or_generate_report, save_grading_results
 from services.solution_service import create_and_save_solution, get_solution_by_question
 
 # ---------- App config
@@ -28,6 +29,7 @@ st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout=LAYOUT)
 
 # ---------- Session State
 ss = st.session_state
+ss.setdefault("analysis_result", None)
 ss.setdefault("editor_text", "")
 ss.setdefault("exam_id", None)
 ss.setdefault("current_step", 1)
@@ -39,6 +41,7 @@ ss.setdefault("submission_id", None)
 ss.setdefault("segmented_items", [])
 ss.setdefault("submission_editor_text", "")
 ss.setdefault("selected_line", {})  # Track selected lines for different editors
+ss.setdefault("grading_results", [])  # Store grading results before saving
 
 # ---------- Helpers
 def display_math_text(text: str, enable_line_click: bool = False, target_key: str = None, max_height: int = None):
@@ -210,22 +213,6 @@ def create_enhanced_text_area(label: str, value: str, height: int, key: str, tar
         key=key,
         help="Click on lines in the preview to navigate here"
     )
-
-def extract_student_name(txt: str) -> str:
-    # Why: quick guess only; teacher can edit
-    patterns = [
-        r"(Họ\s* và \s*tên|Họ\s*tên|Họ\s*-\s*tên|Họ\s*&\s*tên)\s*[:\-]\s*(.+)",
-        r"(Tên|Name)\s*[:\-]\s*(.+)",
-    ]
-    lines = [l.strip() for l in txt.splitlines()[:10] if l.strip()]
-    for ln in lines:
-        for pat in patterns:
-            m = re.search(pat, ln, flags=re.IGNORECASE | re.UNICODE | re.VERBOSE)
-            if m:
-                val = m.group(len(m.groups()))
-                val = re.split(r"(Lớp|Lop|Class)\s*[:\-]", val, flags=re.IGNORECASE)[0]
-                return val.strip()[:60]
-    return ""
 
 # ---------- DB Helpers (pick từ DB khi nhảy bước)
 def list_exams():
@@ -814,6 +801,7 @@ elif ss.current_step == 4 and ss.exam_id:
             st.rerun()
 
 # ====================== STEP 5 ======================
+# ====================== STEP 5 ======================
 elif ss.current_step == 5 and ss.exam_id:
     st.header("Bước 4: Chấm bài")
     st.info(f"📌 Exam ID: {ss.exam_id}")
@@ -837,121 +825,189 @@ elif ss.current_step == 5 and ss.exam_id:
     with colA:
         if st.button("🧮 Chấm toàn bộ bài (So sánh với lời giải chuẩn)", use_container_width=True):
             with st.spinner("Đang chấm bài với AI..."):
-                results = grade_submission(int(ss.submission_id))
+                ss.grading_results = grade_submission(int(ss.submission_id))
+            st.rerun()
+    
+    # Display grading results if available
+    if ss.grading_results:
+        st.subheader("📊 Kết quả chấm chi tiết")
+        
+        # Check if already saved to database
+        with db.get_session() as session:
+            existing_gradings = session.query(Grading).filter(Grading.submission_id == int(ss.submission_id)).count()
+        
+        if existing_gradings == 0:
+            st.warning("⚠️ Kết quả chấm chưa được lưu vào database!")
+            if st.button("💾 Lưu kết quả chấm vào Database", type="primary", use_container_width=True):
+                with st.spinner("Đang lưu kết quả..."):
+                    success = save_grading_results(ss.grading_results)
+                if success:
+                    st.success("✅ Đã lưu kết quả chấm vào database")
+                    st.rerun()
+                else:
+                    st.error("❌ Lỗi khi lưu kết quả chấm")
+        else:
+            st.success(f"✅ Đã có {existing_gradings} kết quả chấm trong database")
+        
+        submission_items = db.get_submission_items(int(ss.submission_id))
+        answers_map = {item.question_id: item.answer_text for item in submission_items}
+
+        correct_count = sum(1 for r in ss.grading_results if r.is_correct)
+        total_count = len(ss.grading_results)
+        st.metric("Tổng quan", f"{correct_count}/{total_count} câu đúng", 
+                 f"{correct_count/total_count*100:.1f}%" if total_count > 0 else "0%")
+        
+        from services.solution_service import get_solution_by_question
+        solutions_map = {}
+        for r in ss.grading_results:
+            solution = get_solution_by_question(r.question_id)
+            solutions_map[r.question_id] = solution.get("reasoning_approach", "Chưa có barem chấm")
+        
+        table_data = []
+        for r in ss.grading_results:
+            student_answer = answers_map.get(r.question_id, "Không làm")
+            status = "✅ ĐÚNG" if r.is_correct else "❌ SAI"
+            reasoning_approach = solutions_map.get(r.question_id, "Chưa có barem chấm")
             
-            if results:
-                st.subheader("📊 Kết quả chấm chi tiết")
-                
-                # Lấy tất cả câu trả lời của học sinh để hiển thị
-                submission_items = db.get_submission_items(int(ss.submission_id))
-                answers_map = {item.question_id: item.answer_text for item in submission_items}
-
-                # Tổng quan kết quả
-                correct_count = sum(1 for r in results if r.is_correct)
-                total_count = len(results)
-                st.metric("Tổng quan", f"{correct_count}/{total_count} câu đúng", 
-                         f"{correct_count/total_count*100:.1f}%" if total_count > 0 else "0%")
-                
-                # Lấy thông tin barem chấm điểm từ database
-                from services.solution_service import get_solution_by_question
-                solutions_map = {}
-                for r in results:
-                    solution = get_solution_by_question(r.question_id)
-                    if solution:
-                        solutions_map[r.question_id] = solution["reasoning_approach"]
-                    else:
-                        solutions_map[r.question_id] = "Chưa có barem chấm"
-                
-                # Tạo bảng dữ liệu full màn hình
-                table_data = []
-                for r in results:
-                    student_answer = answers_map.get(r.question_id, "Không làm")
-                    status = "✅ ĐÚNG" if r.is_correct else "❌ SAI"
-                    reasoning_approach = solutions_map.get(r.question_id, "Chưa có barem chấm")
-                    
-                    # Format knowledge gaps và errors
-                    knowledge_gaps_text = "\n".join([f"• {gap}" for gap in r.knowledge_gaps]) if r.knowledge_gaps else "Không có"
-                    errors_text = "\n".join([f"• {error}" for error in r.calculation_logic_errors]) if r.calculation_logic_errors else "Không có"
-                    
-                    table_data.append({
-                        "Câu": f"{r.order_index}{r.part_label}",
-                        "Barem chấm điểm": reasoning_approach,
-                        "Kết quả": status,
-                        "Bài làm học sinh": student_answer,
-                        "Lỗ hổng kiến thức": knowledge_gaps_text,
-                        "Lỗi tính toán/logic": errors_text
-                    })
-                
-                # Hiển thị bảng full width
-                import pandas as pd
-                df_results = pd.DataFrame(table_data)
-                
-                # Header với nút download
-                col_title, col_download = st.columns([3, 1])
-                with col_title:
-                    st.subheader("📋 Bảng kết quả tổng hợp")
-                with col_download:
-                    # Tạo CSV data để download
-                    csv_data = df_results.to_csv(index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="⬇️ Tải CSV",
-                        data=csv_data,
-                        file_name=f"grading_results_{ss.submission_id}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-                
-                st.dataframe(
-                    df_results,
-                    use_container_width=True,
-                    height=600,
-                    column_config={
-                        "Câu": st.column_config.TextColumn("Câu", width="small"),
-                        "Barem chấm điểm": st.column_config.TextColumn("Barem chấm điểm", width="large"),
-                        "Kết quả": st.column_config.TextColumn("Kết quả", width="small"),
-                        "Bài làm học sinh": st.column_config.TextColumn("Bài làm học sinh", width="large"),
-                        "Lỗ hổng kiến thức": st.column_config.TextColumn("Lỗ hổng kiến thức", width="medium"),
-                        "Lỗi tính toán/logic": st.column_config.TextColumn("Lỗi tính toán/logic", width="medium")
-                    }
-                )
-
-            else:
-                st.info("Không có mục nào để chấm hoặc submission_id không hợp lệ.")
+            knowledge_gaps_text = "\n".join([f"• {gap}" for gap in r.knowledge_gaps]) if r.knowledge_gaps else "Không có"
+            errors_text = "\n".join([f"• {error}" for error in r.calculation_logic_errors]) if r.calculation_logic_errors else "Không có"
+            
+            table_data.append({
+                "Câu": f"{r.order_index}{r.part_label}",
+                "Barem chấm điểm": reasoning_approach,
+                "Kết quả": status,
+                "Bài làm học sinh": student_answer,
+                "Lỗ hổng kiến thức": knowledge_gaps_text,
+                "Lỗi tính toán/logic": errors_text
+            })
+        
+        import pandas as pd
+        df_results = pd.DataFrame(table_data)
+        
+        col_title, col_download = st.columns([3, 1])
+        with col_title:
+            st.subheader("📋 Bảng kết quả tổng hợp")
+        with col_download:
+            csv_data = df_results.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="⬇️ Tải CSV",
+                data=csv_data,
+                file_name=f"grading_results_{ss.submission_id}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        st.dataframe(
+            df_results,
+            use_container_width=True,
+            height=600,
+            column_config={
+                "Câu": st.column_config.TextColumn("Câu", width="small"),
+                "Barem chấm điểm": st.column_config.TextColumn("Barem chấm điểm", width="large"),
+                "Kết quả": st.column_config.TextColumn("Kết quả", width="small"),
+                "Bài làm học sinh": st.column_config.TextColumn("Bài làm học sinh", width="large"),
+                "Lỗ hổng kiến thức": st.column_config.TextColumn("Lỗ hổng kiến thức", width="medium"),
+                "Lỗi tính toán/logic": st.column_config.TextColumn("Lỗi tính toán/logic", width="medium")
+            }
+        )
+    else:
+        if not ss.grading_results:
+            st.info("Nhấn nút 'Chấm toàn bộ bài' để bắt đầu.")
 
     with colB:
-        # Hiển thị báo cáo đã lưu nếu có
         saved_report = db.get_latest_report(int(ss.submission_id))
         if saved_report:
             st.success(f"📄 Báo cáo đã lưu • {saved_report.created_at.strftime('%H:%M %d/%m/%Y')}")
             with st.expander("👀 Xem báo cáo đã lưu", expanded=True):
                 st.markdown(saved_report.report_content)
-            
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                if st.button("🔄 Tạo lại báo cáo", use_container_width=True):
-                    with st.spinner("Đang tạo báo cáo mới..."):
-                        report_md = build_final_report(int(ss.submission_id))
-                        if report_md.strip():
-                            st.success("✅ Đã tạo báo cáo mới")
-                            st.rerun()
-            with col2:
-                st.download_button(
-                    "⬇️ Tải MD",
-                    data=saved_report.report_content,
-                    file_name=f"grading_report_{int(ss.submission_id)}.md",
-                    mime="text/markdown",
-                    use_container_width=True
-                )
-        else:
-            if st.button("📝 Tạo bản chấm tổng hợp", use_container_width=True):
-                with st.spinner("Đang tạo báo cáo..."):
-                    report_md = build_final_report(int(ss.submission_id))
-                    if report_md.strip():
-                        st.success("✅ Đã tạo và lưu báo cáo")
-                        st.rerun()
-                    else:
-                        st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
+        
+        # --- Cụm nút hành động ---
+        report_button_label = "🔄 Tạo lại báo cáo" if saved_report else "📝 Tạo bản chấm tổng hợp"
+        if st.button(report_button_label, use_container_width=True):
+            with st.spinner("Đang tạo báo cáo..."):
+                report_md = build_final_report(int(ss.submission_id))
+                if report_md.strip():
+                    st.success("✅ Đã tạo và lưu báo cáo")
+                    ss.analysis_result = None # Xóa kết quả phân tích cũ nếu tạo báo cáo mới
+                    st.rerun()
+                else:
+                    st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
+        
+        # Kiểm tra xem đã có phân tích lưu sẵn chưa
+        saved_analysis = db.get_performance_analysis(int(ss.submission_id))
+        analysis_button_label = "🔄 Tạo lại phân tích" if saved_analysis else "🔎 Phân tích Nhóm lỗi"
+        
+        if st.button(analysis_button_label, use_container_width=True):
+            with st.spinner("Đang thực hiện phân tích chuyên sâu..."):
+                # Nếu có analysis cũ và user muốn tạo lại, xóa analysis cũ trước
+                if saved_analysis:
+                    with db.get_session() as session:
+                        from database.models import PerformanceAnalysis
+                        session.query(PerformanceAnalysis).filter(
+                            PerformanceAnalysis.submission_id == int(ss.submission_id)
+                        ).delete()
+                        session.commit()
+                
+                result = analyze_submission_performance(int(ss.submission_id))
+                ss.analysis_result = result
+                st.success("✅ Phân tích hoàn tất!")
+                st.rerun()
+        
+        if saved_report:
+            st.download_button(
+                "⬇️ Tải MD",
+                data=saved_report.report_content,
+                file_name=f"grading_report_{int(ss.submission_id)}.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
 
+    # --- Hiển thị kết quả phân tích (nếu có) ---
+    # Kiểm tra session state hoặc database
+    analysis_to_show = ss.analysis_result
+    if not analysis_to_show:
+        # Nếu không có trong session state, thử lấy từ database
+        saved_analysis_data = db.get_performance_analysis(int(ss.submission_id))
+        if saved_analysis_data:
+            # Chuyển đổi format từ database
+            knowledge_summary = []
+            error_summary = []
+            
+            for item in saved_analysis_data:
+                analysis_item = {
+                    "group_name": item["group"],
+                    "description": item["description"],
+                    "related_questions": item["questions"]
+                }
+                
+                if item["type"] == "knowledge":
+                    knowledge_summary.append(analysis_item)
+                elif item["type"] == "error":
+                    error_summary.append(analysis_item)
+            
+            analysis_to_show = {"knowledge_summary": knowledge_summary, "error_summary": error_summary}
+    
+    if analysis_to_show:
+        st.divider()
+        st.subheader("🔍 Kết quả Phân tích Chuyên sâu")
+
+        knowledge_summary = analysis_to_show.get("knowledge_summary", [])
+        error_summary = analysis_to_show.get("error_summary", [])
+
+        if not knowledge_summary and not error_summary:
+            st.info("Không tìm thấy các nhóm lỗi hoặc lỗ hổng kiến thức nổi bật.")
+        else:
+            if knowledge_summary:
+                st.markdown("##### 🧠 Lỗ hổng kiến thức nổi bật")
+                for group in knowledge_summary:
+                    with st.expander(f"**{group['group_name']}** (Câu: {', '.join(group['related_questions'])})"):
+                        st.markdown(group['description'])
+            
+            if error_summary:
+                st.markdown("##### ✏️ Lỗi sai phổ biến")
+                for group in error_summary:
+                    with st.expander(f"**{group['group_name']}** (Câu: {', '.join(group['related_questions'])})"):
+                        st.markdown(group['description'])
 
 st.divider()
 st.caption("Teacher Assistant v1.0 - MVP")

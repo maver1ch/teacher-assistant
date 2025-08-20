@@ -79,3 +79,37 @@ SOLUTION_SCHEMA = {
     },
     "required": ["final_answer", "reasoning_approach", "difficulty"]
 }
+
+PERFORMANCE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "analysis": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["knowledge", "error"],
+                        "description": "Loại vấn đề: 'knowledge' cho lỗ hổng kiến thức, 'error' cho lỗi tính toán/logic."
+                    },
+                    "group": {
+                        "type": "string",
+                        "description": "Tên nhóm vấn đề (ngắn gọn)."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Mô tả chi tiết hơn về bản chất của nhóm vấn đề."
+                    },
+                    "questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Danh sách các câu hỏi liên quan (ví dụ: '1a', '3b')."
+                    }
+                },
+                "required": ["type", "group", "description", "questions"]
+            }
+        }
+    },
+    "required": ["analysis"]
+}

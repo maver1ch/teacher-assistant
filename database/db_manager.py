@@ -3,7 +3,7 @@ import os
 import json
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from database.models import Base, Exam, Question, Submission, Grading, SubmissionItem, QuestionSolution, SubmissionReport
+from database.models import Base, Exam, Question, Submission, Grading, SubmissionItem, QuestionSolution, SubmissionReport, PerformanceAnalysis
 from utils.config import DATABASE_PATH
 
 def format_latex_preview(text: str, max_length: int = 100) -> str:
@@ -126,14 +126,6 @@ class DatabaseManager:
                 QuestionSolution.question_id == question_id
             ).first()
 
-    def update_solution(self, solution_id: int, final_answer: str, reasoning_approach: str):
-        with self.get_session() as session:
-            solution = session.query(QuestionSolution).filter(QuestionSolution.id == solution_id).first()
-            if solution:
-                solution.final_answer = final_answer
-                solution.reasoning_approach = reasoning_approach
-                session.commit()
-
     def create_question(self, exam_id: int, order_index: int, part_label: str, text: str, difficulty: int, knowledge_topics: list) -> int:
         """Tạo câu hỏi mới trong database"""
         with self.get_session() as session:
@@ -160,20 +152,6 @@ class DatabaseManager:
                 Question.question_text == question_text
             ).first()
 
-    def get_solution_preview(self, question_id: int) -> dict:
-        """Lấy solution với LaTeX preview formatted"""
-        solution = self.get_solution_by_question(question_id)
-        if not solution:
-            return {}
-        
-        return {
-            "id": solution.id,
-            "question_id": solution.question_id,
-            "final_answer_preview": format_latex_preview(solution.final_answer, 80),
-            "reasoning_preview": format_latex_preview(solution.reasoning_approach, 120),
-            "created_at": solution.created_at
-        }
-
     def get_questions_with_preview(self, exam_id: int):
         """Lấy danh sách questions với LaTeX preview"""
         with self.get_session() as session:
@@ -190,6 +168,51 @@ class DatabaseManager:
                     "question_preview": format_latex_preview(q.question_text, 120),
                     "difficulty": q.difficulty or 0,  # Default 0 if not set yet
                     "knowledge_topics": json.loads(q.knowledge_topics or "[]")
+                })
+            
+            return results
+
+    def save_performance_analysis(self, submission_id: int, analysis_data: list) -> list:
+        """Lưu kết quả performance analysis vào database"""
+        analysis_ids = []
+        with self.get_session() as session:
+            # Xóa analysis cũ nếu có
+            session.query(PerformanceAnalysis).filter(
+                PerformanceAnalysis.submission_id == submission_id
+            ).delete()
+            
+            # Lưu analysis mới
+            for item in analysis_data:
+                analysis = PerformanceAnalysis(
+                    submission_id=submission_id,
+                    group_name=item.get("group", ""),
+                    group_type=item.get("type", ""),
+                    description=item.get("description", ""),
+                    related_questions=json.dumps(item.get("questions", []), ensure_ascii=False)
+                )
+                session.add(analysis)
+                session.flush()  # Get ID before commit
+                analysis_ids.append(analysis.id)
+            
+            session.commit()
+        return analysis_ids
+
+    def get_performance_analysis(self, submission_id: int) -> list:
+        """Lấy kết quả performance analysis đã lưu"""
+        with self.get_session() as session:
+            analyses = session.query(PerformanceAnalysis).filter(
+                PerformanceAnalysis.submission_id == submission_id
+            ).order_by(PerformanceAnalysis.created_at.desc()).all()
+            
+            results = []
+            for analysis in analyses:
+                results.append({
+                    "id": analysis.id,
+                    "group": analysis.group_name,
+                    "type": analysis.group_type,
+                    "description": analysis.description,
+                    "questions": json.loads(analysis.related_questions or "[]"),
+                    "created_at": analysis.created_at
                 })
             
             return results

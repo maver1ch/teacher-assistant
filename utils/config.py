@@ -12,6 +12,7 @@ API_KEY_ENV = "OPENAI_API_KEY"
 # LLM Service Models
 EXAM_ANALYZER_MODEL = "gpt-4.1-mini"
 SEGMENT_MODEL = "gpt-4.1-mini"
+GROUPING_MODEL = "gpt-4.1-mini"
 
 # Grading Service Models  
 MODEL_GRADING = "gpt-4.1-mini"
@@ -23,10 +24,6 @@ SOLUTION_MODEL_NAME = "gpt-5-mini"
 # ==================== TEMPERATURE SETTINGS ====================
 LLM_TEMPERATURE = 0.1
 GRADING_TEMPERATURE = 0.1
-
-# ==================== CONTEXT LIMITS ====================
-CTX_MAX_CHARS_QUESTION = 800
-CTX_MAX_CHARS_ANSWER = 800
 
 # ==================== DATABASE CONFIGURATION ====================
 DATABASE_PATH = "data/database.db"
