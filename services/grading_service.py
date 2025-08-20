@@ -6,25 +6,29 @@ from typing import List, Dict, Optional, Tuple, Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from utils.prompts import GRADING_SYSTEM_PROMPT, REPORT_SYSTEM_PROMPT
-from utils.config import MODEL_GRADING, MODEL_GRADING_ADVANCED
+
+from utils.prompts import GRADING_SYSTEM_PROMPT
+from utils.config import MODEL_GRADING_ADVANCED
 from utils.schemas import GRADING_SCHEMA
 from utils.data_models import GradingResult
+from utils.llm_logger import log_llm_call
+from utils.constants import (
+    GRADING_USER_PROMPT_TEMPLATE,
+    SERVICE_GRADING_COMPARISON_ADVANCED,
+    DEFAULT_MISSING_ANSWER,
+    ERROR_SOLUTION_NOT_FOUND
+)
 
 # Database
 from database.db_manager import db
-from database.models import Question, Submission, SubmissionItem, Grading, QuestionSolution
+from database.models import Question, Submission, SubmissionItem, Grading
 from services.solution_service import get_solution_by_question
-from utils.llm_logger import log_llm_call
+from services.grading.report_builder import report_builder
+from services.grading.statistics_calculator import stats_calculator
 
-# =====================
-# Client bootstrap
-# =====================
+# Initialize OpenAI client
 load_dotenv()
-_api_key = os.getenv("OPENAI_API_KEY")
-if not _api_key:
-    raise RuntimeError("Missing OPENAI_API_KEY")
-_client = OpenAI(api_key=_api_key)
+_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 # =====================
@@ -39,7 +43,7 @@ def grade_with_solution_comparison(question_id: int, student_answer: str, diffic
     """Grade by comparing student answer with standard solution and rubric"""
     solution = get_solution_by_question(question_id)
     if not solution:
-        raise ValueError(f"Không tìm thấy lời giải chuẩn cho question_id {question_id}")
+        raise ValueError(ERROR_SOLUTION_NOT_FOUND.format(question_id))
     
     payload = {
         "final_answer": solution["final_answer"],             # Đáp án chuẩn
@@ -52,12 +56,10 @@ def grade_with_solution_comparison(question_id: int, student_answer: str, diffic
 
 def _call_grading_ai(payload: Dict) -> Dict[str, Any]:
     """Call OpenAI GPT-5 mini with reasoning to grade with solution comparison"""
-    user_content = (
-        "So sánh bài làm học sinh với đáp án chuẩn và barem chấm điểm:\n\n"
-        f"**ĐÁP ÁN CHUẨN:**\n{payload['final_answer']}\n\n"
-        f"**BAREM CHẤM ĐIỂM:**\n{payload['reasoning_approach']}\n\n"
-        f"**BÀI LÀM HỌC SINH:**\n{payload['student_answer']}\n\n"
-        "Hãy phân tích và đánh giá theo các yếu tố đã nêu trong system prompt."
+    user_content = GRADING_USER_PROMPT_TEMPLATE.format(
+        payload['final_answer'],
+        payload['reasoning_approach'],
+        payload['student_answer']
     )
     
     try:
@@ -75,7 +77,7 @@ def _call_grading_ai(payload: Dict) -> Dict[str, Any]:
                 }
             }
         )
-        log_llm_call(response=resp, model_name=MODEL_GRADING_ADVANCED, service_name="grading_comparison_advanced")
+        log_llm_call(response=resp, model_name=MODEL_GRADING_ADVANCED, service_name=SERVICE_GRADING_COMPARISON_ADVANCED)
         return json.loads(resp.choices[0].message.content)
         
     except Exception as e:
@@ -118,8 +120,8 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
                         question_id=q.id,
                         order_index=q.order_index,
                         part_label=(getattr(q, "part_label", None) or ""),
-                        knowledge_gaps=["Chưa làm"],
-                        calculation_logic_errors=["Chưa làm"],
+                        knowledge_gaps=DEFAULT_MISSING_ANSWER,
+                        calculation_logic_errors=DEFAULT_MISSING_ANSWER,
                         is_correct=False,
                     )
                 )
@@ -147,112 +149,14 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
     return results
 
 
+# Delegated to extracted modules
 def calculate_statistics(compact_data: List[Dict]) -> Dict[str, Any]:
-    """Calculate statistics from grading data"""
-    total_questions = len(compact_data)
-    correct_answers = sum(1 for item in compact_data if item["is_correct"])
-    accuracy_rate = correct_answers / total_questions if total_questions > 0 else 0
-    
-    knowledge_gap_count = 0
-    calculation_error_count = 0
-    
-    for item in compact_data:
-        # Filter out "Chưa làm" entries
-        gaps = [gap for gap in item["knowledge_gaps"] if gap not in ["Chưa làm", "Không thể phân tích do lỗi hệ thống"]]
-        errors = [error for error in item["calculation_logic_errors"] if error not in ["Chưa làm", "Không có"]]
-        
-        knowledge_gap_count += len(gaps)
-        calculation_error_count += len(errors)
-    
-    return {
-        "total_questions": total_questions,
-        "correct_answers": correct_answers,
-        "accuracy_rate": round(accuracy_rate, 2),
-        "knowledge_gap_count": knowledge_gap_count,
-        "calculation_error_count": calculation_error_count
-    }
+    """Calculate statistics from grading data - DEPRECATED, use stats_calculator"""
+    return stats_calculator.calculate_basic_statistics(compact_data)
 
 def build_final_report(submission_id: int) -> str:
-    """Build a student-friendly Markdown summary from existing gradings and save to DB.
-    """
-    with db.get_session() as session:
-        grades = (
-            session.query(Grading, Question)
-            .join(Question, Grading.question_id == Question.id)
-            .filter(Grading.submission_id == submission_id)
-            .order_by(Question.order_index, Question.id)
-            .all()
-        )
-
-    # Prepare compact input for LLM
-    compact = []
-    for g, q in grades:
-        question_label = f"{q.order_index}{getattr(q, 'part_label', None) or ''}"
-        compact.append({
-            "order_index": q.order_index,
-            "part_label": getattr(q, "part_label", None) or "",
-            "question_label": question_label,
-            "knowledge_gaps": _safe_json_loads(g.knowledge_gaps) or [],
-            "calculation_logic_errors": _safe_json_loads(g.calculation_logic_errors) or [],
-            "is_correct": bool(g.is_correct),
-        })
-
-    # Calculate statistics
-    statistics = calculate_statistics(compact)
-    
-    # Get performance analysis
-    try:
-        from services.performance_analyzer import analyze_submission_performance
-        performance_data = analyze_submission_performance(submission_id)
-        
-        # Restructure performance data for better LLM consumption
-        knowledge_groups = performance_data.get("knowledge_summary", [])
-        error_groups = performance_data.get("error_summary", [])
-        
-        performance_analysis = {
-            "knowledge_groups": knowledge_groups,
-            "error_groups": error_groups
-        }
-    except Exception as e:
-        print(f"Warning: Could not get performance analysis: {e}")
-        performance_analysis = {"knowledge_groups": [], "error_groups": []}
-
-    # Create enhanced input structure
-    enhanced_input = {
-        "grading_data": compact,
-        "performance_analysis": performance_analysis,
-        "statistics": statistics
-    }
-
-    user = (
-        "Dưới đây là dữ liệu chấm bài chi tiết và phân tích hiệu suất của học sinh:\n\n"
-        f"**GRADING DATA:**\n{json.dumps(compact, ensure_ascii=False, indent=2)}\n\n"
-        f"**PERFORMANCE ANALYSIS:**\n{json.dumps(performance_analysis, ensure_ascii=False, indent=2)}\n\n"
-        f"**STATISTICS:**\n{json.dumps(statistics, ensure_ascii=False, indent=2)}\n\n"
-        "Hãy tạo báo cáo tổng hợp theo cấu trúc trong system prompt, sử dụng performance analysis để tạo action plan hiệu quả."
-    )
-
-    try:
-        resp = _client.chat.completions.create(
-            model=MODEL_GRADING,
-            messages=[
-                {"role": "system", "content": REPORT_SYSTEM_PROMPT},
-                {"role": "user", "content": user}
-            ],
-            temperature=0.2
-        )
-        log_llm_call(response=resp, model_name=MODEL_GRADING, service_name="report_generation")
-        report_content = resp.choices[0].message.content
-        
-        # Save report to database
-        try:
-            db.save_submission_report(submission_id, report_content)
-        except Exception as e:
-            print(f"Warning: Could not save report to DB: {e}")
-        
-        return report_content
-    except Exception:
-        return "Không thể tạo báo cáo do lỗi hệ thống."
+    """Build a student-friendly Markdown summary - DEPRECATED, use report_builder"""
+    return report_builder.build_report(submission_id)
 
 def save_grading_results(results: List[GradingResult]) -> bool:
     """Save grading results to database"""
@@ -289,13 +193,7 @@ def save_grading_results(results: List[GradingResult]) -> bool:
 
 def get_or_generate_report(submission_id: int) -> str:
     """Get saved report from DB, or generate new one if not exists"""
-    # Try to get saved report first
-    saved_report = db.get_latest_report(submission_id)
-    if saved_report:
-        return saved_report.report_content
-    
-    # Generate new report if not found
-    return build_final_report(submission_id)
+    return report_builder.get_or_generate_report(submission_id)
 
 # =====================
 # Internals
@@ -367,15 +265,14 @@ def _save_grading_new(submission_id: int, question_id: int, question_label: str,
 
 def _create_missing_grading(question: Question, submission_id: int):
     """Tạo grading record cho câu học sinh không làm."""
-    not_done_message = ["Chưa làm"]
     question_label = f"{question.order_index}{question.part_label or ''}"
     # Lưu grading record với thông báo "Chưa làm bài"
     _save_grading_new(
         submission_id=submission_id,
         question_label=question_label,
         question_id=question.id,
-        knowledge_gaps=not_done_message,
-        calculation_logic_errors=not_done_message,
+        knowledge_gaps=DEFAULT_MISSING_ANSWER,
+        calculation_logic_errors=DEFAULT_MISSING_ANSWER,
         is_correct=False
     )
 

@@ -1,10 +1,15 @@
 # database/db_manager.py
 import os
 import json
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
+from dotenv import load_dotenv
+
+# Load environment variables from .env file FIRST
+load_dotenv()
+
 from database.models import Base, Exam, Question, Submission, Grading, SubmissionItem, QuestionSolution, SubmissionReport, PerformanceAnalysis
-from utils.config import DATABASE_PATH
+from utils.config import DATABASE_URL
 
 def format_latex_preview(text: str, max_length: int = 100) -> str:
     """Helper function để format text cho LaTeX preview"""
@@ -22,9 +27,11 @@ def format_latex_preview(text: str, max_length: int = 100) -> str:
 
 class DatabaseManager:
     def __init__(self):
-        os.makedirs("data", exist_ok=True)
-        self.engine = create_engine(f"sqlite:///{DATABASE_PATH}")
-        Base.metadata.create_all(self.engine)  # create new tables if missing
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable not set. Please create a .env file.")
+        
+        self.engine = create_engine(DATABASE_URL)
+        Base.metadata.create_all(self.engine)
         self._run_migrations()  # run any needed schema migrations
         self.SessionLocal = sessionmaker(bind=self.engine)
 
@@ -71,10 +78,10 @@ class DatabaseManager:
                 # Migration 1: Remove original_text column from exams table if it exists
                 try:
                     # Test if column exists by trying to select it
-                    conn.execute("SELECT original_text FROM exams LIMIT 1")
+                    conn.execute(text("SELECT original_text FROM exams LIMIT 1"))
                     # Column exists, drop it
                     print("Dropping original_text column from exams table...")
-                    conn.execute("ALTER TABLE exams DROP COLUMN original_text")
+                    conn.execute(text("ALTER TABLE exams DROP COLUMN IF EXISTS original_text"))
                     print("Migration completed: original_text column removed from exams")
                 except Exception:
                     # Column doesn't exist, continue
@@ -82,7 +89,7 @@ class DatabaseManager:
                 
                 # Migration 2: Check if submission_reports table exists
                 try:
-                    conn.execute("SELECT COUNT(*) FROM submission_reports LIMIT 1")
+                    conn.execute(text("SELECT COUNT(*) FROM submission_reports LIMIT 1"))
                 except Exception:
                     # Table doesn't exist, but SQLAlchemy will create it automatically
                     print("submission_reports table will be created by SQLAlchemy")

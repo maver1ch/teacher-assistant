@@ -1,6 +1,3 @@
-# services/submission_processor.py
-# Service cho Bước 3: Xử lý và phân đoạn bài làm từ hình ảnh
-
 from __future__ import annotations
 
 import os
@@ -13,6 +10,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from utils.config import API_KEY_ENV, SEGMENT_MODEL, LLM_TEMPERATURE
 from utils.schemas import SEGMENT_SCHEMA
+from utils.prompts import SEGMENT_SYSTEM_PROMPT
 from utils.llm_logger import log_llm_call
 
 # Setup logger
@@ -21,33 +19,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 _client = OpenAI(api_key=os.getenv(API_KEY_ENV))
 
-# System prompt cho phân đoạn bài làm
-SYSTEM_PROMPT_SEGMENT = """
-Bạn là AI chuyên gia trích xuất nội dung bài làm học sinh từ skeleton có sẵn.
-
-NHIỆM VỤ
-- Nhận vào: (1) SKELETON có sẵn order_index/part_label/question_id và (2) toàn văn bài làm dưới dạng hình ảnh.
-- Chỉ tìm và điền answer_text cho từng item trong skeleton
-- KHÔNG thay đổi order_index, part_label, question_id, position
-
-QUY TẮC QUAN TRỌNG
-1) Với mỗi item trong skeleton, tìm phần trả lời tương ứng trong hình ảnh.
-2) Kết hợp Dùng ngữ nghĩa (từ khóa, kiến thức) để khớp + trình tự các bài + ký hiệu đánh số để xác định (Ví dụ Bài 1.a, Bài 2.3 hoặc Bài 4.1.a, ...)
-3) Trong bài làm sẽ có những phần không liên quan đến bài (phần gạch xóa, vẽ hình ảnh) => Không diễn giải và xử lí phần đó.
-4) Nếu tìm thấy → điền vào answer_text (**BẢO TOÀN LATEX**: Giữ nguyên mọi công thức toán học trong cặp dấu `$`...`$` (inline) và `$$`...`$$` (display). KHÔNG được xóa các dấu `$` này.)
-5) Nếu KHÔNG tìm thấy (học sinh không làm ý đó) → để answer_text = ""
-6) Cho phép gộp nhiều đoạn của cùng câu thành chuỗi liên tục
-
-LƯỢC ĐỒ JSON (STRICT)
-- Input skeleton giữ nguyên structure
-- Chỉ fill answer_text cho từng item
-- Kết quả: {"items": [skeleton đã điền answer_text]}
-
-IMPORTANT NOTE: OUTPUT luôn luôn là tiếng Việt (Ví dụ Vi-ét không phải Viéte)
-
-VÍ DỤ mẫu:
-Output: {"items": [{"question_id": 1, "order_index": 1, "part_label": "a", "position": 1, "answer_text": "x = 5 vì x + 2 = 7, ..."}]}
-"""
 
 def create_submission_skeleton(questions: List) -> List[Dict[str, Any]]:
     """Create pre-populated skeleton with fixed order_index/part_label"""
@@ -118,7 +89,7 @@ def segment_submission_from_images(questions: List, image_paths: List[str]) -> D
         resp = _client.chat.completions.create(
             model=SEGMENT_MODEL,  # gpt-4.1-mini
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_SEGMENT},
+                {"role": "system", "content": SEGMENT_SYSTEM_PROMPT},
                 {"role": "user", "content": content}
             ],
             max_tokens=10000,

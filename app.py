@@ -1,11 +1,9 @@
 #app.py
-
 import streamlit as st
 import tempfile
 import os
 import logging
 import pandas as pd
-import re
 import json
 
 # ---------- Import config
@@ -15,13 +13,17 @@ from utils.config import PAGE_TITLE, PAGE_ICON, LAYOUT, EDITOR_HEIGHT, DF_HEIGHT
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---------- Initialize LLM Logger (for API call tracking)
+from utils.llm_logger import setup_llm_logger
+setup_llm_logger()
+
 # ---------- Services & DB
 from services.performance_analyzer import analyze_submission_performance
 from services.exam_analyzer import analyze_exam_from_images
 from services.submission_processor import segment_submission_from_images
 from database.db_manager import db
 from database.models import Exam, Submission, Question, SubmissionItem, Grading
-from services.grading_service import grade_submission, build_final_report, get_or_generate_report, save_grading_results
+from services.grading_service import grade_submission, build_final_report, get_or_generate_report
 from services.solution_service import create_and_save_solution, get_solution_by_question
 
 # ---------- App config
@@ -41,7 +43,8 @@ ss.setdefault("submission_id", None)
 ss.setdefault("segmented_items", [])
 ss.setdefault("submission_editor_text", "")
 ss.setdefault("selected_line", {})  # Track selected lines for different editors
-ss.setdefault("grading_results", [])  # Store grading results before saving
+ss.setdefault("password_correct", False) # Thêm session state cho mật khẩu
+ss.setdefault("grading_results", None)  # Lưu kết quả chấm bài
 
 # ---------- Helpers
 def display_math_text(text: str, enable_line_click: bool = False, target_key: str = None, max_height: int = None):
@@ -240,774 +243,705 @@ def list_submissions(exam_id: int):
         logger.exception("list_submissions failed: %s", ex)
         return []
 
-# ---------- Sidebar (Navigator + DB picker) — NO AUTO-APPLY ----------
-with st.sidebar:
-    st.header("📋 Điều hướng nhanh")
+# --- HÀM KIỂM TRA MẬT KHẨU ---
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    try:
+        # Lấy khóa truy cập đã cấu hình trong Streamlit Secrets
+        correct_password = st.secrets["ACCESS_KEY"]
+    except KeyError:
+        # Nếu không có khóa nào được cấu hình, cho phép truy cập (hữu ích khi chạy local)
+        st.warning("🔑 Khóa truy cập chưa được thiết lập trong Secrets. Bỏ qua kiểm tra.")
+        return True
 
-    step_labels = {
-        1: "1️⃣ Upload & OCR đề", 
-        3: "2️⃣ Tạo lời giải",
-        4: "3️⃣ Upload bài làm", 
-        5: "4️⃣ Chấm bài",
-    }
+    # Kiểm tra xem người dùng đã đăng nhập thành công trong session này chưa
+    if ss.get("password_correct", False):
+        return True
 
-    desired_step = st.selectbox(
-        "🔀 Đi tới bước",
-        options=[1, 3, 4, 5],
-        index=max(0, [1, 3, 4, 5].index(ss.current_step) if ss.current_step in [1, 3, 4, 5] else 0),
-        format_func=lambda x: step_labels[x],
-        key="jump_step_select",
-    )
+    # Hiển thị form nhập mật khẩu
+    st.header("🔐 Yêu cầu Truy cập")
+    st.write("Vui lòng nhập khóa truy cập để sử dụng ứng dụng.")
+    with st.form("password_form"):
+        password = st.text_input("Khóa Truy Cập", type="password")
+        submitted = st.form_submit_button("Xác nhận")
 
-    # Lấy danh sách từ DB nhưng KHÔNG áp dụng ngay lập tức
-    pending_exam_id = None
-    pending_submission_id = None
-
-    with st.expander("🔗 Chọn dữ liệu từ DB (để nhảy thẳng)", expanded=(desired_step >= 4)):
-        exams = list_exams()
-        if exams:
-            exam_options = [f'#{e["id"]} • {e["name"]}' for e in exams]
-            default_exam_idx = next((i for i, e in enumerate(exams) if e["id"] == ss.exam_id), 0)
-            chosen_exam_label = st.selectbox("Đề thi (Exam)", exam_options, index=default_exam_idx, key="pick_exam")
-            pending_exam_id = exams[exam_options.index(chosen_exam_label)]["id"]
-            
-            # Preview questions với LaTeX
-            if st.checkbox("Xem trước câu hỏi", value=False, key="preview_questions"):
-                questions_preview = db.get_questions_with_preview(pending_exam_id)
-                if questions_preview:
-                    for q in questions_preview[:3]:  # Chỉ show 3 câu đầu
-                        with st.expander(f"Câu {q['order_index']}{q['part_label']}", expanded=False):
-                            st.markdown(q['question_preview'])
-                            difficulty_text = f"{q['difficulty']}/10" if q['difficulty'] > 0 else "Chưa đánh giá"
-                            st.caption(f"Độ khó: {difficulty_text}")
-                    if len(questions_preview) > 3:
-                        st.caption(f"... và {len(questions_preview) - 3} câu khác")
-        else:
-            st.info("Chưa có Exam trong DB.")
-
-        if pending_exam_id or ss.exam_id:
-            exam_for_subs = pending_exam_id or ss.exam_id
-            subs = list_submissions(exam_for_subs)
-            if subs:
-                sub_options = [f'#{s["id"]} • {s["student_name"]}' for s in subs]
-                default_sub_idx = next((i for i, s in enumerate(subs) if s["id"] == ss.submission_id), 0)
-                chosen_sub_label = st.selectbox("Bài làm (Submission)", sub_options, index=default_sub_idx, key="pick_sub")
-                pending_submission_id = subs[sub_options.index(chosen_sub_label)]["id"]
-                
-                # Preview bài làm nếu có
-                if st.checkbox("Xem trước bài làm", value=False, key="preview_submission"):
-                    submission = db.get_submission_by_id(pending_submission_id)
-                    if submission and hasattr(submission, 'original_text') and submission.original_text:
-                        st.text_area("", value=submission.original_text[:300] + "..." if len(submission.original_text) > 300 else submission.original_text, height=100, disabled=True, key="sidebar_preview")
-            else:
-                st.info("Exam này chưa có Submission.")
-
-    # Export CSV functionality
-    st.markdown("---")
-    st.markdown("**📊 Export dữ liệu**")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📋 Export Gradings", use_container_width=True):
-            try:
-                from export_gradings import export_gradings_to_csv
-                filename = export_gradings_to_csv()
-                st.success(f"✅ Exported: {filename}")
-                
-                # Provide download button
-                with open(filename, "rb") as file:
-                    st.download_button(
-                        "⬇️ Download CSV",
-                        data=file,
-                        file_name=filename,
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-            except Exception as e:
-                st.error(f"❌ Export failed: {e}")
-    
-    with col2:
-        if st.button("📈 Export Summary", use_container_width=True):
-            try:
-                from export_gradings import export_summary_by_student
-                filename = export_summary_by_student()
-                st.success(f"✅ Exported: {filename}")
-                
-                # Provide download button  
-                with open(filename, "rb") as file:
-                    st.download_button(
-                        "⬇️ Download CSV",
-                        data=file,
-                        file_name=filename,
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-            except Exception as e:
-                st.error(f"❌ Export failed: {e}")
-
-    # Chỉ khi bấm nút này mới ÁP DỤNG lựa chọn + NHẢY BƯỚC
-    if st.button("⏩ Đi đến bước đã chọn", use_container_width=True):
-        ok = True
-        # Với step >=2 phải có exam (đang có sẵn hoặc pending)
-        if desired_step >= 2 and not (ss.exam_id or pending_exam_id):
-            st.warning("🔔 Cần chọn Exam trước (trong 'Chọn dữ liệu từ DB').")
-            ok = False
-        # Với step >=5 phải có submission (đang có sẵn hoặc pending)  
-        if desired_step >= 5 and not (ss.submission_id or pending_submission_id):
-            st.warning("🔔 Cần chọn Submission cho Exam đã chọn.")
-            ok = False
-
-        if ok:
-            # Áp dụng các lựa chọn pending (nếu có)
-            if pending_exam_id:
-                ss.exam_id = pending_exam_id
-            if pending_submission_id:
-                ss.submission_id = pending_submission_id
-                # Load submission original_text khi chọn submission
-                submission = db.get_submission_by_id(pending_submission_id)
-                if submission and submission.original_text:
-                    ss.submission_text = submission.original_text
-                    ss.submission_editor_text = submission.original_text
-
-            ss.current_step = desired_step
-            st.rerun()
-
-    st.divider()
-    st.caption(f"Step: {ss.current_step} • Exam: {ss.exam_id or '-'} • Submission: {ss.submission_id or '-'}")
-
-# ====================== STEP 1 ======================
-if ss.current_step == 1:
-    st.header("Bước 1: Upload ảnh đề & Phân tích")
-
-    left, right = st.columns([1, 1])
-    with left:
-        st.subheader("📤 Upload ảnh đề bài")
-        exam_name = st.text_input("Tên đề bài:", placeholder="VD: Đề thi giữa kỳ I Toán 12")
-        uploaded_files = st.file_uploader(
-            "Chọn ảnh (có thể nhiều ảnh)", type=["png", "jpg", "jpeg"], accept_multiple_files=True
-        )
-
-        if uploaded_files and exam_name and st.button("🚀 Phân tích đề bài", type="primary", key="analyze_exam"):
-            with st.spinner("Đang OCR và phân tích đề..."):
-                temp_paths = []
-                for f in uploaded_files:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                        tmp.write(f.getbuffer())
-                        temp_paths.append(tmp.name)
-
-                parsed = analyze_exam_from_images(temp_paths)
-
-                for p in temp_paths:
-                    os.unlink(p)
-
-                ss.parsed_questions = [
-                    {
-                        "order_index": int(p["order_index"]),
-                        "part_label": str(p.get("part_label") or ""),
-                        "text": str(p["text"]).strip(),
-                        "knowledge_topics": [str(x).strip() for x in (p.get("knowledge_topics") or [])][:4],
-                    }
-                    for p in parsed
-                ]
-                
-                if ss.parsed_questions:
-                    exam_id = db.create_exam(exam_name)  # No OCR text stored
-                    ss.exam_id = exam_id
-                    st.success(f"✅ Phân tích hoàn thành: {len(ss.parsed_questions)} câu hỏi.")
-                else:
-                    st.error("Không thể phân tích đề bài. Vui lòng thử lại.")
-
-    with right:
-        st.subheader("🗒️ Trạng thái")
-        if ss.parsed_questions:
-            st.success(f"Đã phân tích {len(ss.parsed_questions)} câu hỏi.")
-        else:
-            st.info("Chưa có dữ liệu phân tích.")
-
-    st.divider()
-
-    if ss.parsed_questions:
-        st.subheader("📋 Kết quả phân tích")
-        df_data = []
-        for i, q in enumerate(ss.parsed_questions):
-            df_data.append({
-                "STT": i + 1,
-                "Bài": q["order_index"],
-                "Ý": q["part_label"] or "",
-                "Nội dung": q["text"],
-                "Kiến thức": " • ".join(q["knowledge_topics"])
-            })
-        
-        # Editable dataframe
-        import pandas as pd
-        df_preview = pd.DataFrame(df_data)
-        st.info("💡 **Hướng dẫn chỉnh sửa:** Kiến thức phân tách bằng dấu • và cần có **3-5 tags**. VD: Hàm số • Đạo hàm • Cực trị")
-        edited_df = st.data_editor(
-            df_preview,
-            height=300,
-            use_container_width=True,
-            column_config={
-                "STT": st.column_config.NumberColumn("STT", disabled=True),
-                "Bài": st.column_config.NumberColumn("Bài", disabled=False),
-                "Ý": st.column_config.TextColumn("Ý", disabled=False),
-                "Nội dung": st.column_config.TextColumn("Nội dung", disabled=False, width="large"),
-                "Kiến thức": st.column_config.TextColumn("Kiến thức (cách nhau bằng •)", disabled=False, width="medium")
-            },
-            key="edit_parsed_preview"
-        )
-        
-        # Update session state with edited data and validation
-        validation_errors = []
-        for i, row in edited_df.iterrows():
-            if i < len(ss.parsed_questions):
-                ss.parsed_questions[i]["order_index"] = int(row["Bài"])
-                ss.parsed_questions[i]["part_label"] = str(row["Ý"])
-                ss.parsed_questions[i]["text"] = str(row["Nội dung"])
-                
-                # Parse and validate knowledge topics (3-5 tags)
-                knowledge_str = str(row["Kiến thức"]).strip()
-                knowledge_topics = [t.strip() for t in knowledge_str.split("•") if t.strip()]
-                
-                if len(knowledge_topics) < 3:
-                    validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Cần ít nhất 3 tag kiến thức")
-                elif len(knowledge_topics) > 5:
-                    validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Tối đa 5 tag kiến thức")
-                
-                ss.parsed_questions[i]["knowledge_topics"] = knowledge_topics[:5]  # Trim to max 5
-        
-        # Display validation errors if any
-        if validation_errors:
-            for error in validation_errors:
-                st.error(error)
-        
-        if st.button("✅ Lưu câu hỏi & Tiếp tục", type="primary", disabled=len(validation_errors) > 0):
-            for q in ss.parsed_questions:
-                db.create_question(
-                    exam_id=ss.exam_id,
-                    order_index=q["order_index"],
-                    part_label=q["part_label"],
-                    text=q["text"],
-                    difficulty=0,  # Default 0, will be set when creating solution
-                    knowledge_topics=q["knowledge_topics"]
-                )
-            # Add solution creation functionality
-            st.divider()
-            st.subheader("📝 Tạo lời giải chuẩn")
-            
-            solutions_created = 0
-            for q in ss.parsed_questions:
-                # Get question from DB to check if solution exists
-                question_from_db = db.get_question_by_text(ss.exam_id, q["text"])
-                existing_solution = None
-                if question_from_db:
-                    existing_solution = get_solution_by_question(question_from_db.id)
-                if not existing_solution:
-                    solutions_created += 1
-            
-            if solutions_created > 0:
-                if st.button(f"🚀 Tạo {solutions_created} lời giải chuẩn", type="secondary"):
-                    with st.spinner("Đang tạo lời giải cho các câu hỏi..."):
-                        for q in ss.parsed_questions:
-                            # Get question ID from database after saving
-                            question_from_db = db.get_question_by_text(ss.exam_id, q["text"])
-                            if question_from_db and not get_solution_by_question(question_from_db.id):
-                                create_and_save_solution(question_from_db.id, q["text"])
-                        st.success("✅ Đã tạo tất cả lời giải")
-                        st.rerun()
-            else:
-                st.success("✅ Tất cả câu hỏi đã có lời giải")
-            
-            ss.current_step = 3
-            st.rerun()
-
-
-# ====================== STEP 3 ======================
-elif ss.current_step == 3 and ss.exam_id:
-    st.header("Bước 2: Tạo lời giải chuẩn")
-    st.info(f"📌 Exam ID: {ss.exam_id}")
-
-    questions = db.get_questions_by_exam(ss.exam_id)
-    
-    if questions:
-        st.subheader("🧠 Tạo lời giải tự động")
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.markdown("**Danh sách câu hỏi:**")
-            question_options = [f"Câu {q.order_index}{q.part_label if q.part_label else ''}: {q.question_text[:50]}..." for q in questions]
-            selected_idx = st.selectbox("Chọn câu hỏi để tạo lời giải:", range(len(questions)), format_func=lambda x: question_options[x])
-            
-            selected_question = questions[selected_idx]
-            
-            if st.button(f"🚀 Tạo lời giải cho câu {selected_question.order_index}{selected_question.part_label or ''}", use_container_width=True):
-                with st.spinner("Đang tạo lời giải..."):
-                    try:
-                        solution_id = create_and_save_solution(selected_question.id)
-                        st.success(f"✅ Đã tạo lời giải (ID: {solution_id})")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Lỗi khi tạo lời giải: {str(e)}")
-        
-        with col2:
-            existing_solution = get_solution_by_question(selected_question.id)
-            if existing_solution:
-                st.markdown(f"**Lời giải câu {existing_solution['order_index']}{existing_solution['part_label'] or ''}:**")
-                
-                with st.expander("🎯 Đáp án cuối"):
-                    display_math_text(existing_solution["final_answer"], max_height=150)
-                    
-                with st.expander("📋 Barem chấm điểm"):
-                    display_math_text(existing_solution["reasoning_approach"], max_height=180)
-                    
-                st.caption(f"Tạo lúc: {existing_solution['created_at']}")
-            else:
-                st.info("Chưa có lời giải cho câu hỏi này.")
-        
-        st.divider()
-        
-        # Tạo lời giải cho tất cả câu hỏi
-        col_a, col_b = st.columns([1, 1])
-        with col_a:
-            if st.button("🔥 Tạo lời giải cho TẤT CẢ câu hỏi", use_container_width=True):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for i, q in enumerate(questions):
-                    status_text.text(f"Đang xử lý câu {q.order_index}{q.part_label or ''}...")
-                    try:
-                        create_and_save_solution(q.id)
-                        progress_bar.progress((i + 1) / len(questions))
-                    except Exception as e:
-                        st.warning(f"Lỗi câu {q.order_index}{q.part_label or ''}: {str(e)}")
-                
-                status_text.text("✅ Hoàn thành!")
-                st.success(f"Đã tạo lời giải cho {len(questions)} câu hỏi.")
-        
-        with col_b:
-            if st.button("➡️ Tiếp tục Bước 3 (Upload bài làm)", use_container_width=True):
-                ss.current_step = 4
+        if submitted:
+            if password == correct_password:
+                # Nếu mật khẩu đúng, lưu trạng thái và chạy lại app
+                ss["password_correct"] = True
                 st.rerun()
-        
-        st.divider()
-        st.subheader("📊 Tổng quan lời giải đã tạo")
-        
-        # Hiển thị bảng tổng quan các solutions
-        solutions_data = []
-        for q in questions:
-            sol = get_solution_by_question(q.id)
-            if sol:
-                solutions_data.append({
-                    "Câu": f"{sol['order_index']}{sol['part_label'] or ''}",
-                    "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
-                    "Độ khó": q.difficulty or 0,
-                    "Tạo lúc": sol['created_at'].strftime("%H:%M %d/%m") if hasattr(sol['created_at'], 'strftime') else str(sol['created_at'])
-                })
             else:
-                solutions_data.append({
-                    "Câu": f"{q.order_index}{q.part_label if q.part_label else ''}",
-                    "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
-                    "Độ khó": q.difficulty or 0,
-                    "Tạo lúc": "-"
-                })
-        
-        if solutions_data:
-            df_solutions = pd.DataFrame(solutions_data)
-            edited_solutions_df = st.data_editor(
-                df_solutions, 
-                use_container_width=True, 
-                height=300,
-                column_config={
-                    "Câu": st.column_config.TextColumn("Câu", disabled=False),
-                    "Nội dung": st.column_config.TextColumn("Nội dung", disabled=False, width="large"),
-                    "Độ khó": st.column_config.NumberColumn("Độ khó", disabled=False, min_value=0, max_value=10),
-                    "Tạo lúc": st.column_config.TextColumn("Tạo lúc", disabled=True)
-                },
-                key="edit_solutions_overview"
-            )
-    else:
-        st.warning("Không có câu hỏi nào. Vui lòng quay lại Bước 1 để phân tích đề.")
+                st.error("😕 Khóa truy cập không chính xác. Vui lòng thử lại.")
+    return False
 
-# ====================== STEP 4 ======================
-elif ss.current_step == 4 and ss.exam_id:
-    st.header("Bước 3: Upload và xử lý bài làm học sinh")
-    
-    if ss.submission_id:
-        st.info(f"📌 Đề • ID: {ss.exam_id} | 📝 Bài làm • ID: {ss.submission_id}")
-    else:
-        st.info(f"📌 Đề • ID: {ss.exam_id}")
+# --- BỌC TOÀN BỘ APP TRONG HÀM KIỂM TRA MẬT KHẨU ---
+if check_password():
+    # ---------- Sidebar (Navigator + DB picker) — NO AUTO-APPLY ----------
+    with st.sidebar:
+        st.header("📋 Điều hướng nhanh")
 
-    st.subheader("📝 BÀI LÀM HỌC SINH")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        # Xem nội dung bài
-        if ss.submission_id:
-            submission = db.get_submission_by_id(ss.submission_id)
-            if submission:
-                with st.expander("👀 Xem nội dung bài", expanded=False):
-                    st.markdown(f"**Tên học sinh:** {submission.student_name}")
-                    st.markdown(f"**Đã tạo:** {submission.created_at}")
-                    if hasattr(submission, 'original_text') and submission.original_text:
-                        st.caption("Nội dung OCR từ trước:")
-                        st.text_area("", value=submission.original_text[:500] + "...", height=100, disabled=True)
-        
-        # Chọn ảnh bài làm
-        st.markdown("**📷 Chọn ảnh bài làm**")
-        submission_files = st.file_uploader(
-            "Upload nhiều ảnh bài làm:", 
-            type=["png", "jpg", "jpeg"], 
-            accept_multiple_files=True, 
-            key="submission_images"
+        step_labels = {
+            1: "1️⃣ Upload & OCR đề", 
+            3: "2️⃣ Tạo lời giải",
+            4: "3️⃣ Upload bài làm", 
+            5: "4️⃣ Chấm bài",
+        }
+
+        desired_step = st.selectbox(
+            "🔀 Đi tới bước",
+            options=[1, 3, 4, 5],
+            index=max(0, [1, 3, 4, 5].index(ss.current_step) if ss.current_step in [1, 3, 4, 5] else 0),
+            format_func=lambda x: step_labels[x],
+            key="jump_step_select",
         )
-        
-        if submission_files:
-            st.success(f"Đã chọn {len(submission_files)} ảnh")
-            
-            # Preview ảnh đã upload
-            if st.checkbox("Xem preview ảnh"):
-                cols = st.columns(min(len(submission_files), 3))
-                for i, img_file in enumerate(submission_files[:3]):
-                    with cols[i]:
-                        st.image(img_file, caption=f"Ảnh {i+1}", use_container_width=True)
-                if len(submission_files) > 3:
-                    st.caption(f"... và {len(submission_files) - 3} ảnh khác")
-    
-    with col2:
-        # Thông tin học sinh
-        st.markdown("**👤 Thông tin học sinh**")
-        student_name = st.text_input("Tên học sinh:", value="", key="student_name_input")
-        
-        # Nút xử lý
-        if submission_files and student_name.strip():
-            if st.button("🚀 Xử lý bài làm", type="primary", use_container_width=True):
-                with st.spinner("Đang xử lý hình ảnh và phân đoạn bài làm..."):
-                    # Tạo temp files
+
+        # Lấy danh sách từ DB nhưng KHÔNG áp dụng ngay lập tức
+        pending_exam_id = None
+        pending_submission_id = None
+
+        with st.expander("🔗 Chọn dữ liệu từ DB (để nhảy thẳng)", expanded=(desired_step >= 4)):
+            exams = list_exams()
+            if exams:
+                exam_options = [f'#{e["id"]} • {e["name"]}' for e in exams]
+                default_exam_idx = next((i for i, e in enumerate(exams) if e["id"] == ss.exam_id), 0)
+                chosen_exam_label = st.selectbox("Đề thi (Exam)", exam_options, index=default_exam_idx, key="pick_exam")
+                pending_exam_id = exams[exam_options.index(chosen_exam_label)]["id"]
+                
+                # Preview questions với LaTeX
+                if st.checkbox("Xem trước câu hỏi", value=False, key="preview_questions"):
+                    questions_preview = db.get_questions_with_preview(pending_exam_id)
+                    if questions_preview:
+                        for q in questions_preview[:3]:  # Chỉ show 3 câu đầu
+                            with st.expander(f"Câu {q['order_index']}{q['part_label']}", expanded=False):
+                                st.markdown(q['question_preview'])
+                                difficulty_text = f"{q['difficulty']}/10" if q['difficulty'] > 0 else "Chưa đánh giá"
+                                st.caption(f"Độ khó: {difficulty_text}")
+                        if len(questions_preview) > 3:
+                            st.caption(f"... và {len(questions_preview) - 3} câu khác")
+            else:
+                st.info("Chưa có Exam trong DB.")
+
+            if pending_exam_id or ss.exam_id:
+                exam_for_subs = pending_exam_id or ss.exam_id
+                subs = list_submissions(exam_for_subs)
+                if subs:
+                    sub_options = [f'#{s["id"]} • {s["student_name"]}' for s in subs]
+                    default_sub_idx = next((i for i, s in enumerate(subs) if s["id"] == ss.submission_id), 0)
+                    chosen_sub_label = st.selectbox("Bài làm (Submission)", sub_options, index=default_sub_idx, key="pick_sub")
+                    pending_submission_id = subs[sub_options.index(chosen_sub_label)]["id"]
+                    
+                    # Preview bài làm nếu có
+                    if st.checkbox("Xem trước bài làm", value=False, key="preview_submission"):
+                        submission = db.get_submission_by_id(pending_submission_id)
+                        if submission and hasattr(submission, 'original_text') and submission.original_text:
+                            st.text_area("", value=submission.original_text[:300] + "..." if len(submission.original_text) > 300 else submission.original_text, height=100, disabled=True, key="sidebar_preview")
+                else:
+                    st.info("Exam này chưa có Submission.")
+
+
+        # Chỉ khi bấm nút này mới ÁP DỤNG lựa chọn + NHẢY BƯỚC
+        if st.button("⏩ Đi đến bước đã chọn", use_container_width=True):
+            ok = True
+            # Với step >=2 phải có exam (đang có sẵn hoặc pending)
+            if desired_step >= 2 and not (ss.exam_id or pending_exam_id):
+                st.warning("🔔 Cần chọn Exam trước (trong 'Chọn dữ liệu từ DB').")
+                ok = False
+            # Với step >=5 phải có submission (đang có sẵn hoặc pending)  
+            if desired_step >= 5 and not (ss.submission_id or pending_submission_id):
+                st.warning("🔔 Cần chọn Submission cho Exam đã chọn.")
+                ok = False
+
+            if ok:
+                # Áp dụng các lựa chọn pending (nếu có)
+                if pending_exam_id:
+                    ss.exam_id = pending_exam_id
+                if pending_submission_id:
+                    ss.submission_id = pending_submission_id
+                    # Load submission original_text khi chọn submission
+                    submission = db.get_submission_by_id(pending_submission_id)
+                    if submission and submission.original_text:
+                        ss.submission_text = submission.original_text
+                        ss.submission_editor_text = submission.original_text
+
+                ss.current_step = desired_step
+                st.rerun()
+
+        st.divider()
+        st.caption(f"Step: {ss.current_step} • Exam: {ss.exam_id or '-'} • Submission: {ss.submission_id or '-'}")
+
+    # ====================== STEP 1 ======================
+    if ss.current_step == 1:
+        st.header("Bước 1: Upload ảnh đề & Phân tích")
+
+        left, right = st.columns([1, 1])
+        with left:
+            st.subheader("📤 Upload ảnh đề bài")
+            exam_name = st.text_input("Tên đề bài:", placeholder="VD: Đề thi giữa kỳ I Toán 12")
+            uploaded_files = st.file_uploader(
+                "Chọn ảnh (có thể nhiều ảnh)", type=["png", "jpg", "jpeg"], accept_multiple_files=True
+            )
+
+            if uploaded_files and exam_name and st.button("🚀 Phân tích đề bài", type="primary", key="analyze_exam"):
+                with st.spinner("Đang OCR và phân tích đề..."):
                     temp_paths = []
-                    for f in submission_files:
+                    for f in uploaded_files:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                             tmp.write(f.getbuffer())
                             temp_paths.append(tmp.name)
-                    
-                    try:
-                        # Gọi function xử lý hình ảnh (sẽ tạo sau)
-                        questions = db.get_questions_by_exam(ss.exam_id)
-                        if questions:
-                            from services.submission_processor import segment_submission_from_images
-                            data = segment_submission_from_images(questions, temp_paths)
-                            ss.segmented_items = data.get("items", [])
-                            
-                            # Lưu submission vào DB (không có original_text từ OCR)
-                            sub_id = db.create_submission(
-                                exam_id=ss.exam_id,
-                                student_name=student_name.strip(),
-                                original_text=""  # Không lưu text vì xử lý trực tiếp từ hình
-                            )
-                            ss.submission_id = sub_id
-                            
-                            st.success(f"✅ Đã xử lý {len(submission_files)} ảnh • Phân đoạn {len(ss.segmented_items)} items • Submission ID: {sub_id}")
-                        else:
-                            st.error("Không tìm thấy câu hỏi cho đề này.")
-                            
-                    except Exception as e:
-                        st.error(f"❌ Lỗi xử lý: {str(e)}")
-                    finally:
-                        # Cleanup temp files
-                        for p in temp_paths:
-                            try:
-                                os.unlink(p)
-                            except:
-                                pass
-                    
-                st.rerun()
-        elif submission_files:
-            st.warning("Vui lòng nhập tên học sinh")
-        elif student_name.strip():
-            st.warning("Vui lòng chọn ảnh bài làm")
 
-    # Hiển thị kết quả phân đoạn
-    if ss.segmented_items:
+                    parsed = analyze_exam_from_images(temp_paths)
+
+                    for p in temp_paths:
+                        os.unlink(p)
+
+                    ss.parsed_questions = [
+                        {
+                            "order_index": int(p["order_index"]),
+                            "part_label": str(p.get("part_label") or ""),
+                            "text": str(p["text"]).strip(),
+                            "knowledge_topics": [str(x).strip() for x in (p.get("knowledge_topics") or [])][:4],
+                        }
+                        for p in parsed
+                    ]
+                    
+                    if ss.parsed_questions:
+                        exam_id = db.create_exam(exam_name)  # No OCR text stored
+                        ss.exam_id = exam_id
+                        st.success(f"✅ Phân tích hoàn thành: {len(ss.parsed_questions)} câu hỏi.")
+                    else:
+                        st.error("Không thể phân tích đề bài. Vui lòng thử lại.")
+
+        with right:
+            st.subheader("🗒️ Trạng thái")
+            if ss.parsed_questions:
+                st.success(f"Đã phân tích {len(ss.parsed_questions)} câu hỏi.")
+            else:
+                st.info("Chưa có dữ liệu phân tích.")
+
         st.divider()
-        st.subheader("✏️ Kết quả phân đoạn bài làm")
+
+        if ss.parsed_questions:
+            st.subheader("📋 Kết quả phân tích")
+            df_data = []
+            for i, q in enumerate(ss.parsed_questions):
+                df_data.append({
+                    "STT": i + 1,
+                    "Bài": q["order_index"],
+                    "Ý": q["part_label"] or "",
+                    "Nội dung": q["text"],
+                    "Kiến thức": " • ".join(q["knowledge_topics"])
+                })
+            
+            # Editable dataframe
+            import pandas as pd
+            df_preview = pd.DataFrame(df_data)
+            st.info("💡 **Hướng dẫn chỉnh sửa:** Kiến thức phân tách bằng dấu • và cần có **3-5 tags**. VD: Hàm số • Đạo hàm • Cực trị")
+            edited_df = st.data_editor(
+                df_preview,
+                height=300,
+                use_container_width=True,
+                column_config={
+                    "STT": st.column_config.NumberColumn("STT", disabled=True),
+                    "Bài": st.column_config.NumberColumn("Bài", disabled=False),
+                    "Ý": st.column_config.TextColumn("Ý", disabled=False),
+                    "Nội dung": st.column_config.TextColumn("Nội dung", disabled=False, width="large"),
+                    "Kiến thức": st.column_config.TextColumn("Kiến thức (cách nhau bằng •)", disabled=False, width="medium")
+                },
+                key="edit_parsed_preview"
+            )
+            
+            # Update session state with edited data and validation
+            validation_errors = []
+            for i, row in edited_df.iterrows():
+                if i < len(ss.parsed_questions):
+                    ss.parsed_questions[i]["order_index"] = int(row["Bài"])
+                    ss.parsed_questions[i]["part_label"] = str(row["Ý"])
+                    ss.parsed_questions[i]["text"] = str(row["Nội dung"])
+                    
+                    # Parse and validate knowledge topics (3-5 tags)
+                    knowledge_str = str(row["Kiến thức"]).strip()
+                    knowledge_topics = [t.strip() for t in knowledge_str.split("•") if t.strip()]
+                    
+                    if len(knowledge_topics) < 3:
+                        validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Cần ít nhất 3 tag kiến thức")
+                    elif len(knowledge_topics) > 5:
+                        validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Tối đa 5 tag kiến thức")
+                    
+                    ss.parsed_questions[i]["knowledge_topics"] = knowledge_topics[:5]  # Trim to max 5
+            
+            # Display validation errors if any
+            if validation_errors:
+                for error in validation_errors:
+                    st.error(error)
+            
+            if st.button("✅ Lưu câu hỏi & Tiếp tục", type="primary", disabled=len(validation_errors) > 0):
+                for q in ss.parsed_questions:
+                    db.create_question(
+                        exam_id=ss.exam_id,
+                        order_index=q["order_index"],
+                        part_label=q["part_label"],
+                        text=q["text"],
+                        difficulty=0,  # Default 0, will be set when creating solution
+                        knowledge_topics=q["knowledge_topics"]
+                    )
+                
+                ss.current_step = 3
+                st.rerun()
+
+
+    # ====================== STEP 3 ======================
+    elif ss.current_step == 3 and ss.exam_id:
+        st.header("Bước 2: Tạo lời giải chuẩn")
+        st.info(f"📌 Exam ID: {ss.exam_id}")
+
+        questions = db.get_questions_by_exam(ss.exam_id)
         
-        # Editable dataframe với LaTeX preview  
-        col1, col2 = st.columns([3, 2])
+        if questions:
+            st.subheader("🧠 Tạo lời giải tự động")
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.markdown("**Danh sách câu hỏi:**")
+                question_options = [f"Câu {q.order_index}{q.part_label if q.part_label else ''}: {q.question_text[:50]}..." for q in questions]
+                selected_idx = st.selectbox("Chọn câu hỏi để tạo lời giải:", range(len(questions)), format_func=lambda x: question_options[x])
+                
+                selected_question = questions[selected_idx]
+                
+                if st.button(f"🚀 Tạo lời giải cho câu {selected_question.order_index}{selected_question.part_label or ''}", use_container_width=True):
+                    with st.spinner("Đang tạo lời giải..."):
+                        try:
+                            solution_id = create_and_save_solution(selected_question.id)
+                            st.success(f"✅ Đã tạo lời giải (ID: {solution_id})")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Lỗi khi tạo lời giải: {str(e)}")
+            
+            with col2:
+                existing_solution = get_solution_by_question(selected_question.id)
+                if existing_solution:
+                    st.markdown(f"**Lời giải câu {existing_solution['order_index']}{existing_solution['part_label'] or ''}:**")
+                    
+                    with st.expander("🎯 Đáp án cuối"):
+                        display_math_text(existing_solution["final_answer"], max_height=150)
+                        
+                    with st.expander("📋 Barem chấm điểm"):
+                        display_math_text(existing_solution["reasoning_approach"], max_height=180)
+                        
+                    st.caption(f"Tạo lúc: {existing_solution['created_at']}")
+                else:
+                    st.info("Chưa có lời giải cho câu hỏi này.")
+            
+            st.divider()
+            
+            # Tạo lời giải cho tất cả câu hỏi
+            col_a, col_b = st.columns([1, 1])
+            with col_a:
+                if st.button("🔥 Tạo lời giải cho TẤT CẢ câu hỏi", use_container_width=True):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    for i, q in enumerate(questions):
+                        status_text.text(f"Đang xử lý câu {q.order_index}{q.part_label or ''}...")
+                        try:
+                            create_and_save_solution(q.id)
+                            progress_bar.progress((i + 1) / len(questions))
+                        except Exception as e:
+                            st.warning(f"Lỗi câu {q.order_index}{q.part_label or ''}: {str(e)}")
+                    
+                    status_text.text("✅ Hoàn thành!")
+                    st.success(f"Đã tạo lời giải cho {len(questions)} câu hỏi.")
+            
+            with col_b:
+                if st.button("➡️ Tiếp tục Bước 3 (Upload bài làm)", use_container_width=True):
+                    ss.current_step = 4
+                    st.rerun()
+            
+            st.divider()
+            st.subheader("📊 Tổng quan lời giải đã tạo")
+            
+            # Hiển thị bảng tổng quan các solutions
+            solutions_data = []
+            for q in questions:
+                sol = get_solution_by_question(q.id)
+                if sol:
+                    solutions_data.append({
+                        "Câu": f"{sol['order_index']}{sol['part_label'] or ''}",
+                        "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
+                        "Độ khó": q.difficulty or 0,
+                        "Tạo lúc": sol['created_at'].strftime("%H:%M %d/%m") if hasattr(sol['created_at'], 'strftime') else str(sol['created_at'])
+                    })
+                else:
+                    solutions_data.append({
+                        "Câu": f"{q.order_index}{q.part_label if q.part_label else ''}",
+                        "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
+                        "Độ khó": q.difficulty or 0,
+                        "Tạo lúc": "-"
+                    })
+            
+            if solutions_data:
+                df_solutions = pd.DataFrame(solutions_data)
+                edited_solutions_df = st.data_editor(
+                    df_solutions, 
+                    use_container_width=True, 
+                    height=300,
+                    column_config={
+                        "Câu": st.column_config.TextColumn("Câu", disabled=False),
+                        "Nội dung": st.column_config.TextColumn("Nội dung", disabled=False, width="large"),
+                        "Độ khó": st.column_config.NumberColumn("Độ khó", disabled=False, min_value=0, max_value=10),
+                        "Tạo lúc": st.column_config.TextColumn("Tạo lúc", disabled=True)
+                    },
+                    key="edit_solutions_overview"
+                )
+        else:
+            st.warning("Không có câu hỏi nào. Vui lòng quay lại Bước 1 để phân tích đề.")
+
+    # ====================== STEP 4 ======================
+    elif ss.current_step == 4 and ss.exam_id:
+        st.header("Bước 3: Upload và xử lý bài làm học sinh")
+        
+        if ss.submission_id:
+            st.info(f"📌 Đề • ID: {ss.exam_id} | 📝 Bài làm • ID: {ss.submission_id}")
+        else:
+            st.info(f"📌 Đề • ID: {ss.exam_id}")
+
+        st.subheader("📝 BÀI LÀM HỌC SINH")
+        
+        col1, col2 = st.columns([2, 1])
         
         with col1:
-            st.markdown("**📝 Chỉnh sửa kết quả phân đoạn:**")
+            # Xem nội dung bài
+            if ss.submission_id:
+                submission = db.get_submission_by_id(ss.submission_id)
+                if submission:
+                    with st.expander("👀 Xem nội dung bài", expanded=False):
+                        st.markdown(f"**Tên học sinh:** {submission.student_name}")
+                        st.markdown(f"**Đã tạo:** {submission.created_at}")
+                        if hasattr(submission, 'original_text') and submission.original_text:
+                            st.caption("Nội dung OCR từ trước:")
+                            st.text_area("", value=submission.original_text[:500] + "...", height=100, disabled=True)
             
-            # Convert to editable DataFrame
-            df_seg = pd.DataFrame(ss.segmented_items).sort_values(["position"])
-            
-            edited_df = st.data_editor(
-                df_seg,
-                column_config={
-                    "question_id": st.column_config.NumberColumn("Question ID", disabled=True),
-                    "order_index": st.column_config.NumberColumn("Order", disabled=True), 
-                    "part_label": st.column_config.TextColumn("Part", disabled=True),
-                    "position": st.column_config.NumberColumn("Pos", disabled=True),
-                    "answer_text": st.column_config.TextColumn("Answer Text", width="large")
-                },
-                disabled=["question_id", "order_index", "part_label", "position"],
-                hide_index=True,
-                use_container_width=True,
-                height=400,
-                key="editable_segments"
+            # Chọn ảnh bài làm
+            st.markdown("**📷 Chọn ảnh bài làm**")
+            submission_files = st.file_uploader(
+                "Upload nhiều ảnh bài làm:", 
+                type=["png", "jpg", "jpeg"], 
+                accept_multiple_files=True, 
+                key="submission_images"
             )
             
-            # Update session state với data đã edit
-            ss.segmented_items = edited_df.to_dict('records')
+            if submission_files:
+                st.success(f"Đã chọn {len(submission_files)} ảnh")
+                
+                # Preview ảnh đã upload
+                if st.checkbox("Xem preview ảnh"):
+                    cols = st.columns(min(len(submission_files), 3))
+                    for i, img_file in enumerate(submission_files[:3]):
+                        with cols[i]:
+                            st.image(img_file, caption=f"Ảnh {i+1}", use_container_width=True)
+                    if len(submission_files) > 3:
+                        st.caption(f"... và {len(submission_files) - 3} ảnh khác")
         
         with col2:
-            st.markdown("**🔍 LaTeX Preview:**")
+            # Thông tin học sinh
+            st.markdown("**👤 Thông tin học sinh**")
+            student_name = st.text_input("Tên học sinh:", value="", key="student_name_input")
             
-            # Select row để preview
-            selected_row = st.selectbox(
-                "Chọn row để preview:",
-                range(len(edited_df)),
-                format_func=lambda x: f"Row {x+1}: {edited_df.iloc[x]['order_index']}{edited_df.iloc[x]['part_label']}"
-            )
-            
-            if selected_row is not None:
-                preview_text = edited_df.iloc[selected_row]['answer_text']
-                if preview_text and preview_text.strip():
-                    st.markdown("**Preview:**")
-                    with st.container():
-                        display_math_text(preview_text)
-                else:
-                    st.info("Answer text trống")
-
-        if st.button("💾 Lưu chi tiết từng ý (submission_items)", type="primary", use_container_width=True):
-            with db.get_session() as session:
-                for it in ss.segmented_items:
-                    item = SubmissionItem(
-                        submission_id=ss.submission_id,
-                        question_id=int(it["question_id"]),
-                        order_index=int(it["order_index"]),
-                        part_label=str(it.get("part_label") or ""),
-                        position=int(it.get("position") or 1),
-                        answer_text=str(it.get("answer_text") or "").strip(),
-                    )
-                    session.add(item)
-                session.commit()
-            st.success("Đã lưu các ý của bài làm vào submission_items.")
-
-    # Nút chuyển bước 4
-    if ss.submission_id:
-        st.divider()
-        if st.button("➡️ Tiếp tục Bước 4 (Chấm bài)", type="primary", use_container_width=True):
-            ss.current_step = 5
-            st.rerun()
-
-# ====================== STEP 5 ======================
-# ====================== STEP 5 ======================
-elif ss.current_step == 5 and ss.exam_id:
-    st.header("Bước 4: Chấm bài")
-    st.info(f"📌 Exam ID: {ss.exam_id}")
-
-    # Nếu user nhảy thẳng vào Bước 5 mà chưa có submission_id → cho chọn
-    if not ss.submission_id:
-        st.warning("Bạn chưa chọn Submission. Hãy chọn bên Sidebar, hoặc ngay tại đây.")
-        subs_inline = list_submissions(ss.exam_id)
-        if subs_inline:
-            opt_inline = [f'#{s["id"]} • {s["student_name"]}' for s in subs_inline]
-            pick_inline = st.selectbox("Chọn Submission để chấm", opt_inline, key="pick_sub_inline")
-            picked = subs_inline[opt_inline.index(pick_inline)]
-            ss.submission_id = picked["id"]
-            st.rerun()
-        else:
-            st.stop()
-
-    st.success(f"🎯 Submission ID đang chấm: {ss.submission_id}")
-
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.button("🧮 Chấm toàn bộ bài (So sánh với lời giải chuẩn)", use_container_width=True):
-            with st.spinner("Đang chấm bài với AI..."):
-                ss.grading_results = grade_submission(int(ss.submission_id))
-            st.rerun()
-    
-    # Display grading results if available
-    if ss.grading_results:
-        st.subheader("📊 Kết quả chấm chi tiết")
-        
-        # Check if already saved to database
-        with db.get_session() as session:
-            existing_gradings = session.query(Grading).filter(Grading.submission_id == int(ss.submission_id)).count()
-        
-        if existing_gradings == 0:
-            st.warning("⚠️ Kết quả chấm chưa được lưu vào database!")
-            if st.button("💾 Lưu kết quả chấm vào Database", type="primary", use_container_width=True):
-                with st.spinner("Đang lưu kết quả..."):
-                    success = save_grading_results(ss.grading_results)
-                if success:
-                    st.success("✅ Đã lưu kết quả chấm vào database")
+            # Nút xử lý
+            if submission_files and student_name.strip():
+                if st.button("🚀 Xử lý bài làm", type="primary", use_container_width=True):
+                    with st.spinner("Đang xử lý hình ảnh và phân đoạn bài làm..."):
+                        # Tạo temp files
+                        temp_paths = []
+                        for f in submission_files:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                                tmp.write(f.getbuffer())
+                                temp_paths.append(tmp.name)
+                        
+                        try:
+                            # Gọi function xử lý hình ảnh (sẽ tạo sau)
+                            questions = db.get_questions_by_exam(ss.exam_id)
+                            if questions:
+                                from services.submission_processor import segment_submission_from_images
+                                data = segment_submission_from_images(questions, temp_paths)
+                                ss.segmented_items = data.get("items", [])
+                                
+                                # Lưu submission vào DB (không có original_text từ OCR)
+                                sub_id = db.create_submission(
+                                    exam_id=ss.exam_id,
+                                    student_name=student_name.strip(),
+                                    original_text=""  # Không lưu text vì xử lý trực tiếp từ hình
+                                )
+                                ss.submission_id = sub_id
+                                
+                                st.success(f"✅ Đã xử lý {len(submission_files)} ảnh • Phân đoạn {len(ss.segmented_items)} items • Submission ID: {sub_id}")
+                            else:
+                                st.error("Không tìm thấy câu hỏi cho đề này.")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Lỗi xử lý: {str(e)}")
+                        finally:
+                            # Cleanup temp files
+                            for p in temp_paths:
+                                try:
+                                    os.unlink(p)
+                                except:
+                                    pass
+                        
                     st.rerun()
-                else:
-                    st.error("❌ Lỗi khi lưu kết quả chấm")
-        else:
-            st.success(f"✅ Đã có {existing_gradings} kết quả chấm trong database")
-        
-        submission_items = db.get_submission_items(int(ss.submission_id))
-        answers_map = {item.question_id: item.answer_text for item in submission_items}
+            elif submission_files:
+                st.warning("Vui lòng nhập tên học sinh")
+            elif student_name.strip():
+                st.warning("Vui lòng chọn ảnh bài làm")
 
-        correct_count = sum(1 for r in ss.grading_results if r.is_correct)
-        total_count = len(ss.grading_results)
-        st.metric("Tổng quan", f"{correct_count}/{total_count} câu đúng", 
-                 f"{correct_count/total_count*100:.1f}%" if total_count > 0 else "0%")
-        
-        from services.solution_service import get_solution_by_question
-        solutions_map = {}
-        for r in ss.grading_results:
-            solution = get_solution_by_question(r.question_id)
-            solutions_map[r.question_id] = solution.get("reasoning_approach", "Chưa có barem chấm")
-        
-        table_data = []
-        for r in ss.grading_results:
-            student_answer = answers_map.get(r.question_id, "Không làm")
-            status = "✅ ĐÚNG" if r.is_correct else "❌ SAI"
-            reasoning_approach = solutions_map.get(r.question_id, "Chưa có barem chấm")
+        # Hiển thị kết quả phân đoạn
+        if ss.segmented_items:
+            st.divider()
+            st.subheader("✏️ Kết quả phân đoạn bài làm")
             
-            knowledge_gaps_text = "\n".join([f"• {gap}" for gap in r.knowledge_gaps]) if r.knowledge_gaps else "Không có"
-            errors_text = "\n".join([f"• {error}" for error in r.calculation_logic_errors]) if r.calculation_logic_errors else "Không có"
+            # Editable dataframe với LaTeX preview  
+            col1, col2 = st.columns([3, 2])
             
-            table_data.append({
-                "Câu": f"{r.order_index}{r.part_label}",
-                "Barem chấm điểm": reasoning_approach,
-                "Kết quả": status,
-                "Bài làm học sinh": student_answer,
-                "Lỗ hổng kiến thức": knowledge_gaps_text,
-                "Lỗi tính toán/logic": errors_text
-            })
-        
-        import pandas as pd
-        df_results = pd.DataFrame(table_data)
-        
-        col_title, col_download = st.columns([3, 1])
-        with col_title:
-            st.subheader("📋 Bảng kết quả tổng hợp")
-        with col_download:
-            csv_data = df_results.to_csv(index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="⬇️ Tải CSV",
-                data=csv_data,
-                file_name=f"grading_results_{ss.submission_id}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        st.dataframe(
-            df_results,
-            use_container_width=True,
-            height=600,
-            column_config={
-                "Câu": st.column_config.TextColumn("Câu", width="small"),
-                "Barem chấm điểm": st.column_config.TextColumn("Barem chấm điểm", width="large"),
-                "Kết quả": st.column_config.TextColumn("Kết quả", width="small"),
-                "Bài làm học sinh": st.column_config.TextColumn("Bài làm học sinh", width="large"),
-                "Lỗ hổng kiến thức": st.column_config.TextColumn("Lỗ hổng kiến thức", width="medium"),
-                "Lỗi tính toán/logic": st.column_config.TextColumn("Lỗi tính toán/logic", width="medium")
-            }
-        )
-    else:
-        if not ss.grading_results:
-            st.info("Nhấn nút 'Chấm toàn bộ bài' để bắt đầu.")
+            with col1:
+                st.markdown("**📝 Chỉnh sửa kết quả phân đoạn:**")
+                
+                # Convert to editable DataFrame
+                df_seg = pd.DataFrame(ss.segmented_items).sort_values(["position"])
+                
+                edited_df = st.data_editor(
+                    df_seg,
+                    column_config={
+                        "question_id": st.column_config.NumberColumn("Question ID", disabled=True),
+                        "order_index": st.column_config.NumberColumn("Order", disabled=True), 
+                        "part_label": st.column_config.TextColumn("Part", disabled=True),
+                        "position": st.column_config.NumberColumn("Pos", disabled=True),
+                        "answer_text": st.column_config.TextColumn("Answer Text", width="large")
+                    },
+                    disabled=["question_id", "order_index", "part_label", "position"],
+                    hide_index=True,
+                    use_container_width=True,
+                    height=400,
+                    key="editable_segments"
+                )
+                
+                # Update session state với data đã edit
+                ss.segmented_items = edited_df.to_dict('records')
+            
+            with col2:
+                st.markdown("**🔍 LaTeX Preview:**")
+                
+                # Select row để preview
+                selected_row = st.selectbox(
+                    "Chọn row để preview:",
+                    range(len(edited_df)),
+                    format_func=lambda x: f"Row {x+1}: {edited_df.iloc[x]['order_index']}{edited_df.iloc[x]['part_label']}"
+                )
+                
+                if selected_row is not None:
+                    preview_text = edited_df.iloc[selected_row]['answer_text']
+                    if preview_text and preview_text.strip():
+                        st.markdown("**Preview:**")
+                        with st.container():
+                            display_math_text(preview_text)
+                    else:
+                        st.info("Answer text trống")
 
-    with colB:
-        saved_report = db.get_latest_report(int(ss.submission_id))
-        if saved_report:
-            st.success(f"📄 Báo cáo đã lưu • {saved_report.created_at.strftime('%H:%M %d/%m/%Y')}")
-            with st.expander("👀 Xem báo cáo đã lưu", expanded=True):
-                st.markdown(saved_report.report_content)
-        
-        # --- Cụm nút hành động ---
-        report_button_label = "🔄 Tạo lại báo cáo" if saved_report else "📝 Tạo bản chấm tổng hợp"
-        if st.button(report_button_label, use_container_width=True):
-            with st.spinner("Đang tạo báo cáo..."):
-                report_md = build_final_report(int(ss.submission_id))
-                if report_md.strip():
-                    st.success("✅ Đã tạo và lưu báo cáo")
-                    ss.analysis_result = None # Xóa kết quả phân tích cũ nếu tạo báo cáo mới
-                    st.rerun()
-                else:
-                    st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
-        
-        # Kiểm tra xem đã có phân tích lưu sẵn chưa
-        saved_analysis = db.get_performance_analysis(int(ss.submission_id))
-        analysis_button_label = "🔄 Tạo lại phân tích" if saved_analysis else "🔎 Phân tích Nhóm lỗi"
-        
-        if st.button(analysis_button_label, use_container_width=True):
-            with st.spinner("Đang thực hiện phân tích chuyên sâu..."):
-                # Nếu có analysis cũ và user muốn tạo lại, xóa analysis cũ trước
-                if saved_analysis:
+            # The save and continue button is now combined
+            if st.button("💾 Lưu & Tiếp tục Chấm bài", type="primary", use_container_width=True):
+                with st.spinner("Đang lưu các câu trả lời..."):
                     with db.get_session() as session:
-                        from database.models import PerformanceAnalysis
-                        session.query(PerformanceAnalysis).filter(
-                            PerformanceAnalysis.submission_id == int(ss.submission_id)
-                        ).delete()
+                        # Clear old items for this submission to prevent duplicates if user goes back and edits
+                        session.query(SubmissionItem).filter(SubmissionItem.submission_id == ss.submission_id).delete()
+                        
+                        for it in ss.segmented_items:
+                            item = SubmissionItem(
+                                submission_id=ss.submission_id,
+                                question_id=int(it["question_id"]),
+                                order_index=int(it["order_index"]),
+                                part_label=str(it.get("part_label") or ""),
+                                position=int(it.get("position") or 1),
+                                answer_text=str(it.get("answer_text") or "").strip(),
+                            )
+                            session.add(item)
                         session.commit()
+                    st.success("Đã lưu các ý của bài làm.")
                 
-                result = analyze_submission_performance(int(ss.submission_id))
-                ss.analysis_result = result
-                st.success("✅ Phân tích hoàn tất!")
+                # Navigate to the next step
+                ss.current_step = 5
                 st.rerun()
-        
-        if saved_report:
-            st.download_button(
-                "⬇️ Tải MD",
-                data=saved_report.report_content,
-                file_name=f"grading_report_{int(ss.submission_id)}.md",
-                mime="text/markdown",
-                use_container_width=True
-            )
 
-    # --- Hiển thị kết quả phân tích (nếu có) ---
-    # Kiểm tra session state hoặc database
-    analysis_to_show = ss.analysis_result
-    if not analysis_to_show:
-        # Nếu không có trong session state, thử lấy từ database
-        saved_analysis_data = db.get_performance_analysis(int(ss.submission_id))
-        if saved_analysis_data:
-            # Chuyển đổi format từ database
-            knowledge_summary = []
-            error_summary = []
-            
-            for item in saved_analysis_data:
-                analysis_item = {
-                    "group_name": item["group"],
-                    "description": item["description"],
-                    "related_questions": item["questions"]
-                }
+        # Nút chuyển bước 5 (đã được gộp vào nút trên)
+        if ss.submission_id and not ss.segmented_items:
+            st.divider()
+            if st.button("➡️ Tiếp tục Bước 4 (Chấm bài)", use_container_width=True):
+                ss.current_step = 5
+                st.rerun()
+
+    # ====================== STEP 5 ======================
+    elif ss.current_step == 5 and ss.exam_id:
+        st.header("Bước 4: Chấm bài")
+        st.info(f"📌 Exam ID: {ss.exam_id}")
+
+        # Nếu user nhảy thẳng vào Bước 5 mà chưa có submission_id → cho chọn
+        if not ss.submission_id:
+            st.warning("Bạn chưa chọn Submission. Hãy chọn bên Sidebar, hoặc ngay tại đây.")
+            subs_inline = list_submissions(ss.exam_id)
+            if subs_inline:
+                opt_inline = [f'#{s["id"]} • {s["student_name"]}' for s in subs_inline]
+                pick_inline = st.selectbox("Chọn Submission để chấm", opt_inline, key="pick_sub_inline")
+                picked = subs_inline[opt_inline.index(pick_inline)]
+                ss.submission_id = picked["id"]
+                st.rerun()
+            else:
+                st.stop()
+
+        st.success(f"🎯 Submission ID đang chấm: {ss.submission_id}")
+
+        # --- Lấy dữ liệu đã lưu từ DB lên trước ---
+        saved_analysis = db.get_performance_analysis(int(ss.submission_id))
+
+        colA, colB = st.columns([1, 1])
+        with colA:
+            st.subheader("⚙️ Chấm bài tự động")
+
+            if st.button("🧮 Chấm toàn bộ bài", use_container_width=True, type="primary"):
+                with st.spinner("Đang chấm bài ..."):
+                    results = grade_submission(int(ss.submission_id))
+                    ss.grading_results = results  # Lưu vào session state
                 
-                if item["type"] == "knowledge":
-                    knowledge_summary.append(analysis_item)
-                elif item["type"] == "error":
-                    error_summary.append(analysis_item)
+            # Hiển thị kết quả từ session state thay vì biến local
+            if ss.grading_results:
+                st.subheader("📊 Kết quả chấm chi tiết")
+                    
+                submission_items = db.get_submission_items(int(ss.submission_id))
+                answers_map = {item.question_id: item.answer_text for item in submission_items}
+
+                correct_count = sum(1 for r in ss.grading_results if r.is_correct)
+                total_count = len(ss.grading_results)
+                st.metric("Tổng quan", f"{correct_count}/{total_count} câu đúng", 
+                         f"{correct_count/total_count*100:.1f}%" if total_count > 0 else "0%")
+                
+                from services.solution_service import get_solution_by_question
+                solutions_map = {}
+                for r in ss.grading_results:
+                    solution = get_solution_by_question(r.question_id)
+                    solutions_map[r.question_id] = solution.get("reasoning_approach", "Chưa có barem chấm")
+                
+                table_data = []
+                for r in ss.grading_results:
+                    student_answer = answers_map.get(r.question_id, "Không làm")
+                    status = "✅ ĐÚNG" if r.is_correct else "❌ SAI"
+                    reasoning_approach = solutions_map.get(r.question_id, "Chưa có barem chấm")
+                    
+                    knowledge_gaps_text = "\n".join([f"• {gap}" for gap in r.knowledge_gaps]) if r.knowledge_gaps else "Không có"
+                    errors_text = "\n".join([f"• {error}" for error in r.calculation_logic_errors]) if r.calculation_logic_errors else "Không có"
+                    
+                    table_data.append({
+                        "Câu": f"{r.order_index}{r.part_label}",
+                        "Barem chấm điểm": reasoning_approach,
+                        "Kết quả": status,
+                        "Bài làm học sinh": student_answer,
+                        "Lỗ hổng kiến thức": knowledge_gaps_text,
+                        "Lỗi tính toán/logic": errors_text
+                    })
+                    
+                import pandas as pd
+                df_results = pd.DataFrame(table_data)
+                
+                col_title, col_download, col_save = st.columns([2, 1, 1])
+                with col_title:
+                    st.subheader("📋 Bảng kết quả tổng hợp")
+                with col_download:
+                    csv_data = df_results.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="⬇️ Tải CSV",
+                        data=csv_data,
+                        file_name=f"grading_results_{ss.submission_id}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                with col_save:
+                    if st.button("💾 Lưu vào DB", use_container_width=True):
+                        from services.grading_service import save_grading_results
+                        if save_grading_results(ss.grading_results):
+                            st.success("✅ Đã lưu kết quả!")
+                        else:
+                            st.error("❌ Lỗi khi lưu!")
+                
+                st.dataframe(
+                    df_results,
+                    use_container_width=True,
+                    height=600,
+                    column_config={
+                        "Câu": st.column_config.TextColumn("Câu", width="small"),
+                        "Barem chấm điểm": st.column_config.TextColumn("Barem chấm điểm", width="large"),
+                        "Kết quả": st.column_config.TextColumn("Kết quả", width="small"),
+                        "Bài làm học sinh": st.column_config.TextColumn("Bài làm học sinh", width="large"),
+                        "Lỗ hổng kiến thức": st.column_config.TextColumn("Lỗ hổng kiến thức", width="medium"),
+                        "Lỗi tính toán/logic": st.column_config.TextColumn("Lỗi tính toán/logic", width="medium")
+                    }
+                )
+
+            else:
+                st.info("Chưa chấm bài hoặc không có kết quả chấm.")
+
+        with colB:
+            saved_report = db.get_latest_report(int(ss.submission_id))
+            if saved_report:
+                st.success(f"📄 Báo cáo đã lưu • {saved_report.created_at.strftime('%H:%M %d/%m/%Y')}")
+                with st.expander("👀 Xem báo cáo đã lưu", expanded=True):
+                    st.markdown(saved_report.report_content)
             
-            analysis_to_show = {"knowledge_summary": knowledge_summary, "error_summary": error_summary}
-    
-    if analysis_to_show:
-        st.divider()
-        st.subheader("🔍 Kết quả Phân tích Chuyên sâu")
-
-        knowledge_summary = analysis_to_show.get("knowledge_summary", [])
-        error_summary = analysis_to_show.get("error_summary", [])
-
-        if not knowledge_summary and not error_summary:
-            st.info("Không tìm thấy các nhóm lỗi hoặc lỗ hổng kiến thức nổi bật.")
-        else:
-            if knowledge_summary:
-                st.markdown("##### 🧠 Lỗ hổng kiến thức nổi bật")
-                for group in knowledge_summary:
-                    with st.expander(f"**{group['group_name']}** (Câu: {', '.join(group['related_questions'])})"):
-                        st.markdown(group['description'])
+            # --- Cụm nút hành động ---
+            report_button_label = "🔄 Tạo lại báo cáo" if saved_report else "📝 Tạo bản chấm tổng hợp"
+            if st.button(report_button_label, use_container_width=True):
+                with st.spinner("Đang tạo báo cáo..."):
+                    report_md = build_final_report(int(ss.submission_id))
+                    if report_md.strip():
+                        st.success("✅ Đã tạo và lưu báo cáo")
+                        st.rerun()
+                    else:
+                        st.info("Chưa có dữ liệu chấm hoặc báo cáo rỗng.")
             
-            if error_summary:
-                st.markdown("##### ✏️ Lỗi sai phổ biến")
-                for group in error_summary:
-                    with st.expander(f"**{group['group_name']}** (Câu: {', '.join(group['related_questions'])})"):
-                        st.markdown(group['description'])
+            analysis_button_label = "🔄 Phân tích lại Nhóm lỗi" if saved_analysis else "🔎 Phân tích Nhóm lỗi"
+            if st.button(analysis_button_label, use_container_width=True):
+                with st.spinner("Đang thực hiện phân tích chuyên sâu..."):
+                    analyze_submission_performance(int(ss.submission_id))
+                    st.success("✅ Phân tích hoàn tất và đã lưu!")
+                    st.rerun()
+            
+            if saved_report:
+                st.download_button(
+                    "⬇️ Tải MD",
+                    data=saved_report.report_content,
+                    file_name=f"grading_report_{int(ss.submission_id)}.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
 
-st.divider()
-st.caption("Teacher Assistant v1.0 - MVP")
+        # --- Hiển thị kết quả phân tích (ưu tiên từ DB) ---
+        if saved_analysis:
+            st.divider()
+            st.subheader("🔍 Kết quả Phân tích Chuyên sâu (Đã lưu)")
+            
+            # Group analysis by type
+            knowledge_summary = [item for item in saved_analysis if item["type"] == "knowledge"]
+            error_summary = [item for item in saved_analysis if item["type"] == "error"]
+
+            if not knowledge_summary and not error_summary:
+                st.info("Không tìm thấy các nhóm lỗi hoặc lỗ hổng kiến thức nổi bật.")
+            else:
+                if knowledge_summary:
+                    st.markdown("##### 🧠 Lỗ hổng kiến thức nổi bật")
+                    for group in knowledge_summary:
+                        with st.expander(f"**{group['group']}** (Câu: {', '.join(group['questions'])})"):
+                            st.markdown(group['description'])
+                
+                if error_summary:
+                    st.markdown("##### ✏️ Lỗi sai phổ biến")
+                    for group in error_summary:
+                        with st.expander(f"**{group['group']}** (Câu: {', '.join(group['questions'])})"):
+                            st.markdown(group['description'])
+
+    st.divider()
+    st.caption("Teacher Assistant v1.0 - MVP")

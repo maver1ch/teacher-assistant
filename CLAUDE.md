@@ -46,26 +46,30 @@ The application follows a 4-step workflow (displayed as steps 1, 2, 3, 4 in the 
 
 ### Key Components
 
-- `app.py`: Main Streamlit application with 4-step workflow and sidebar navigation
+- `app.py`: Main Streamlit application with 4-step workflow, sidebar navigation, and password protection
 - `database/`: SQLAlchemy models and database manager
-  - `models.py`: Database models (Exam, Question, Submission, SubmissionItem, Grading, QuestionSolution, SubmissionReport)
-  - `db_manager.py`: Database operations and migrations
+  - `models.py`: Database models (Exam, Question, Submission, SubmissionItem, Grading, QuestionSolution, SubmissionReport, PerformanceAnalysis)
+  - `db_manager.py`: Database operations with PostgreSQL/Neon support and automatic migrations
 - `services/`: Core business logic services
   - `exam_analyzer.py`: OpenAI vision models for OCR and question analysis from exam images
-  - `grading_service.py`: Core grading logic comparing student answers with solutions using GPT-5-mini for advanced reasoning
+  - `grading_service.py`: Core grading logic with separate report building functionality
+  - `grading/`: Modular grading components
+    - `report_builder.py`: Dedicated report generation service
+    - `statistics_calculator.py`: Statistical analysis utilities
   - `submission_processor.py`: Process and segment student submissions using skeleton-based approach
   - `solution_service.py`: Generate standard solutions and grading rubrics using GPT-5-mini
   - `performance_analyzer.py`: Advanced analysis to group common mistakes and knowledge gaps
 - `utils/`: Utility modules and configurations
-  - `config.py`: Application configuration including model settings and API keys
-  - `schemas.py`: JSON schemas for OpenAI API responses
-  - `data_models.py`: Data models for internal processing (GradingResult, SolutionResult, QuestionLite)
-  - `prompts.py`: Comprehensive system prompts for various AI tasks
+  - `config.py`: Application configuration with model settings, API keys, and PostgreSQL database URL
+  - `constants.py`: Centralized constants, error messages, and application defaults
   - `llm_logger.py`: LLM API call logging with cost tracking
-- `export_gradings.py`: Standalone script for exporting grading results to CSV
+  - `schemas.py`: JSON schemas for OpenAI API responses
+  - `data_models.py`: Data models for internal processing
+  - `prompts.py`: Comprehensive system prompts for various AI tasks
+- `check_db.py`: PostgreSQL/Neon database connection checker
 - `delete_gradings.py`: CLI tool for clearing grading data
 
-The database uses SQLite with foreign key relationships. Session state management allows jumping between workflow steps and preserves user data.
+The database supports both PostgreSQL (Neon) and SQLite with foreign key relationships. Session state management allows jumping between workflow steps and preserves user data.
 
 ## Development Commands
 
@@ -83,6 +87,12 @@ streamlit run app.py
 Create a `.env` file with:
 ```
 OPENAI_API_KEY=your_openai_api_key_here
+DATABASE_URL=your_database_connection_string
+```
+
+### Database Check
+```bash
+python check_db.py
 ```
 
 ## Database Schema
@@ -95,8 +105,9 @@ The application uses SQLAlchemy with the following key models:
 - `SubmissionItem`: Segmented answers for specific questions with position tracking
 - `Grading`: AI-generated feedback with knowledge gaps analysis, calculation/logic errors, correctness assessment, and final scores
 - `SubmissionReport`: Generated markdown reports for students
+- `PerformanceAnalysis`: Grouped analysis of knowledge gaps and errors across submissions
 
-Data is stored in `data/database.db` (SQLite). The database includes automatic migrations and foreign key relationships.
+Database supports PostgreSQL (Neon) and SQLite with automatic migrations and foreign key relationships.
 
 ## AI Integration
 
@@ -124,17 +135,18 @@ The Streamlit app uses extensive session state to:
 ## Key Features
 
 - 4-step workflow with ability to jump between steps via sidebar navigation
+- Password protection with Streamlit secrets integration
 - Multi-image OCR support for both exams and submissions using OpenAI vision models
 - Real-time LaTeX preview with $/$$$ syntax support and interactive line clicking
 - Vietnamese language support throughout all UI and AI responses
-- Database persistence with ability to resume work from any step
+- Database persistence with PostgreSQL/Neon support and ability to resume work from any step
 - AI-powered question difficulty assessment (1-10 scale) and knowledge topic extraction (3-5 tags)
 - Standard solution generation with grading rubrics using context from related questions
 - Comprehensive grading with knowledge gap analysis and calculation error detection
-- Performance analysis to group common mistakes across submissions
-- Export functionality for detailed gradings and student summaries to CSV
+- Performance analysis to group common mistakes across submissions with database persistence
 - Editable segmentation results with LaTeX preview and validation
-- Report generation with markdown export
+- Modular report generation with dedicated report builder service
+- Grading results persistence in session state to prevent loss during CSV downloads
 - LLM API call logging with cost tracking
 - Database migration support and CLI tools for data management
 
@@ -146,7 +158,7 @@ The Streamlit app uses extensive session state to:
 3. **Solution Generation**: Question context → GPT-5-mini reasoning → Solution storage
 4. **Submission Segmentation**: Skeleton creation → Vision matching → Editable results
 5. **Grading**: Solution comparison → GPT-5-mini analysis → Detailed feedback
-6. **Reporting**: Data aggregation → Report generation → Export functionality
+6. **Reporting**: Data aggregation → Report generation → Student feedback
 
 ### Error Handling
 - JSON schema validation for all AI responses
@@ -156,6 +168,9 @@ The Streamlit app uses extensive session state to:
 
 ### Performance Considerations
 - Efficient database queries with joins and indexing
+- PostgreSQL/Neon cloud database support for scalability
 - Session state management for large datasets
 - Streaming responses for long-running operations
 - Cost-optimized model selection per task
+- Direct OpenAI client usage with consistent temperature handling
+- Modular service architecture for better maintainability

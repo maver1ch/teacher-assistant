@@ -1,7 +1,7 @@
 # services/performance_analyzer.py
-import os
 import json
 import logging
+import os
 from typing import List, Dict, Any
 
 from dotenv import load_dotenv
@@ -12,6 +12,19 @@ from database.models import Grading
 from utils.config import GROUPING_MODEL
 from utils.schemas import PERFORMANCE_ANALYSIS_SCHEMA
 from utils.llm_logger import log_llm_call
+from utils.constants import (
+    PERFORMANCE_ANALYSIS_USER_PROMPT_TEMPLATE,
+    SERVICE_PERFORMANCE_ANALYSIS,
+    INVALID_KNOWLEDGE_GAPS,
+    INVALID_CALCULATION_ERRORS,
+    ERROR_PERFORMANCE_ANALYSIS_FAILED,
+    SUCCESS_PERFORMANCE_ANALYSIS
+)
+from utils.prompts import PERFORMANCE_ANALYSIS_SYSTEM_PROMPT
+
+# Initialize OpenAI client
+load_dotenv()
+_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Setup logger for this module
 logger = logging.getLogger(__name__)
@@ -22,34 +35,6 @@ if not logger.handlers:
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-load_dotenv()
-_client = OpenAI(api_key=os.getenv(os.getenv("OPENAI_API_KEY")))
-
-SYSTEM_PROMPT_ANALYZE_PERFORMANCE = """
-Bạn là một chuyên gia phân tích giáo dục, có khả năng nhận diện các mẫu hình sai sót và lỗ hổng kiến thức từ kết quả chấm bài của học sinh.
-
-NHIỆM VỤ:
-- Nhận vào một danh sách các lỗi sai và lỗ hổng kiến thức từ bài làm của học sinh.
-- Phân tích và nhóm (grouping) các vấn đề này thành các hạng mục có ý nghĩa với **PHẠM VI RỘNG**.
-- Với mỗi nhóm, đưa ra một tên gọi **TỔNG QUÁT**, một mô tả về bản chất vấn đề, và liệt kê các câu hỏi liên quan.
-- Trả về kết quả dưới dạng JSON nghiêm ngặt theo schema đã cho.
-
-NGUYÊN TẮC GROUPING RỘNG:
-1. **Tìm kiếm sự tương đồng**: Nhóm các lỗi có cùng **LĨNH VỰC KIẾN THỨC** hoặc **LOẠI SAI SỐT**.
-2. **Ưu tiên group names rộng và có ý nghĩa**:
-   - ✅ GOOD: "Vấn đề về hàm số và đồ thị"
-   - ❌ BAD: "Không tìm được giao điểm" 
-3. **Mỗi group phải cover nhiều lỗi**: Một group tối thiểu nên chứa 2+ lỗi tương tự.
-4. **Hierarchy thinking**: Tư duy theo thứ bậc từ cụ thể → chung:
-   - Lỗi cụ thể: "Tính sai (-2)×3"
-   - Lỗi loại: "Lỗi tính toán cơ bản"  
-   - Vấn đề tổng quát: "Kỹ năng tính toán và cẩn thận"
-
-VÍ DỤ GROUPING TỐT:
-- "Lỗ hổng kiến thức đại số cơ bản" (thay vì "Không nhớ công thức")
-- "Vấn đề về phương trình và bất phương trình" (thay vì "Giải sai phương trình")
-- "Kỹ năng tính toán và độ chính xác" (thay vì "Tính sai")
-"""
 
 def analyze_submission_performance(submission_id: int) -> Dict[str, List[Dict[str, Any]]]:
     """Analyzes all grading results for a submission and groups common mistakes."""
@@ -89,24 +74,7 @@ def analyze_submission_performance(submission_id: int) -> Dict[str, List[Dict[st
         return {"knowledge_summary": [], "error_summary": []}
 
     # Prepare data for the LLM
-    error_data = []
-    skipped_count = 0
-    for g in gradings:
-        # Skip items that were not done or had system errors
-        gaps = json.loads(g.knowledge_gaps or "[]")
-        errors = json.loads(g.calculation_logic_errors or "[]")
-        
-        is_valid_gap = any(gap not in ["Chưa làm", "Không thể phân tích do lỗi hệ thống"] for gap in gaps)
-        is_valid_error = any(error not in ["Chưa làm", "Không có"] for error in errors)
-        
-        if is_valid_gap or is_valid_error:
-            error_data.append({
-                "question_label": g.question_label or "N/A",
-                "knowledge_gaps": gaps if is_valid_gap else [],
-                "calculation_logic_errors": errors if is_valid_error else []
-            })
-        else:
-            skipped_count += 1
+    error_data, skipped_count = _prepare_analysis_data(gradings)
             
     logger.info(f"Data preparation complete: {len(error_data)} valid items, {skipped_count} items skipped")
     if not error_data:
@@ -123,35 +91,8 @@ def analyze_submission_performance(submission_id: int) -> Dict[str, List[Dict[st
     print(f"\n[PERFORMANCE ANALYZER] Input data summary: {len(error_data)} items prepared for LLM analysis")
     print(f"Input data: {json.dumps(error_data, ensure_ascii=False, indent=2)}")
 
-    user_prompt = (
-        "Dưới đây là danh sách chi tiết các lỗi từ bài làm của một học sinh. "
-        "Hãy phân tích và nhóm chúng lại theo hướng dẫn.\n\n"
-        f"{json.dumps(error_data, ensure_ascii=False, indent=2)}"
-    )
-
     try:
-        logger.info(f"Calling LLM with model: {GROUPING_MODEL}")
-        print(f"\n[PERFORMANCE ANALYZER] Calling LLM for analysis...")
-        
-        resp = _client.chat.completions.create(
-            model=GROUPING_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT_ANALYZE_PERFORMANCE},
-                {"role": "user", "content": user_prompt}
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "performance_analysis",
-                    "schema": PERFORMANCE_ANALYSIS_SCHEMA
-                }
-            }
-        )
-        log_llm_call(response=resp, model_name=GROUPING_MODEL, service_name="performance_analysis")
-        
-        # Parse response
-        analysis_result = json.loads(resp.choices[0].message.content)
-        analysis_items = analysis_result.get("analysis", [])
+        analysis_items = _call_performance_analysis_llm(error_data)
         logger.info(f"LLM returned {len(analysis_items)} analysis groups")
         
         # Lưu kết quả vào database
@@ -182,7 +123,69 @@ def analyze_submission_performance(submission_id: int) -> Dict[str, List[Dict[st
         return {"knowledge_summary": knowledge_summary, "error_summary": error_summary}
         
     except Exception as e:
-        error_msg = f"Error during performance analysis: {e}"
+        error_msg = ERROR_PERFORMANCE_ANALYSIS_FAILED.format(str(e))
         logger.error(error_msg)
         print(f"[PERFORMANCE ANALYZER ERROR] {error_msg}")
         return {"knowledge_summary": [], "error_summary": []}
+
+
+# =====================
+# Helper Functions
+# =====================
+
+def _prepare_analysis_data(gradings: List[Grading]) -> tuple[List[Dict[str, Any]], int]:
+    """Prepare grading data for LLM analysis"""
+    error_data = []
+    skipped_count = 0
+    
+    for g in gradings:
+        # Skip items that were not done or had system errors
+        gaps = json.loads(g.knowledge_gaps or "[]")
+        errors = json.loads(g.calculation_logic_errors or "[]")
+        
+        is_valid_gap = any(gap not in INVALID_KNOWLEDGE_GAPS for gap in gaps)
+        is_valid_error = any(error not in INVALID_CALCULATION_ERRORS for error in errors)
+        
+        if is_valid_gap or is_valid_error:
+            error_data.append({
+                "question_label": g.question_label or "N/A",
+                "knowledge_gaps": gaps if is_valid_gap else [],
+                "calculation_logic_errors": errors if is_valid_error else []
+            })
+        else:
+            skipped_count += 1
+    
+    return error_data, skipped_count
+
+
+def _call_performance_analysis_llm(error_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Call LLM for performance analysis"""
+    logger.info(f"Calling LLM with model: {GROUPING_MODEL}")
+    print(f"\n[PERFORMANCE ANALYZER] Calling LLM for analysis...")
+    
+    user_prompt = PERFORMANCE_ANALYSIS_USER_PROMPT_TEMPLATE.format(
+        json.dumps(error_data, ensure_ascii=False, indent=2)
+    )
+    
+    try:
+        resp = _client.chat.completions.create(
+            model=GROUPING_MODEL,
+            messages=[
+                {"role": "system", "content": PERFORMANCE_ANALYSIS_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "performance_analysis",
+                    "schema": PERFORMANCE_ANALYSIS_SCHEMA
+                }
+            }
+        )
+        log_llm_call(response=resp, model_name=GROUPING_MODEL, service_name=SERVICE_PERFORMANCE_ANALYSIS)
+        analysis_result = json.loads(resp.choices[0].message.content)
+        return analysis_result.get("analysis", [])
+    except Exception as e:
+        logger.error(f"LLM call failed: {e}")
+        return []

@@ -1,3 +1,9 @@
+import os
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+
 # ==================== APP CONFIGURATION ====================
 PAGE_TITLE = "Trợ lý Chấm bài"
 PAGE_ICON = "📚"
@@ -14,9 +20,9 @@ EXAM_ANALYZER_MODEL = "gpt-4.1-mini"
 SEGMENT_MODEL = "gpt-4.1-mini"
 GROUPING_MODEL = "gpt-4.1-mini"
 
-# Grading Service Models  
-MODEL_GRADING = "gpt-4.1-mini"
+# Grading Service Model (Advanced only)
 MODEL_GRADING_ADVANCED = "gpt-5-mini"
+MODEL_REPORT = "gpt-4.1-mini"
 
 # Solution Service Model
 SOLUTION_MODEL_NAME = "gpt-5-mini"
@@ -26,7 +32,7 @@ LLM_TEMPERATURE = 0.1
 GRADING_TEMPERATURE = 0.1
 
 # ==================== DATABASE CONFIGURATION ====================
-DATABASE_PATH = "data/database.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 MODEL_PRICING = {
     # gpt-4o-mini and its variants
