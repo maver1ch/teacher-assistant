@@ -37,39 +37,38 @@ This is a Vietnamese teacher assistant application built with Streamlit for auto
 
 ### Core Architecture
 
-The application follows a 4-step workflow (displayed as steps 1, 2, 3, 4 in the UI):
+The application follows a 4-step workflow displayed as numbered steps in the UI:
 
-1. **Exam Analysis (Step 1)**: Upload and analyze exam images using OpenAI vision models, parse into individual questions with difficulty ratings and knowledge topics
-2. **Solution Generation (Step 2)**: Create standard solutions with reasoning approaches and grading rubrics for each question  
-3. **Submission Processing (Step 3)**: Upload student submission images, process and segment into question-specific answers using skeleton-based matching
-4. **AI Grading (Step 4)**: Grade each submission item by comparing with standard solutions, identify knowledge gaps and calculation errors, generate reports
+1. **Exam Analysis (Step 1)**: Upload and analyze exam images using OpenAI vision models, parse into individual questions with knowledge topics (3-5 tags required)
+2. **Solution Generation (Step 2/3)**: Create standard solutions with reasoning approaches and grading rubrics for each question using GPT-5-mini
+3. **Submission Processing (Step 3/4)**: Upload student submission images, process and segment into question-specific answers 
+4. **AI Grading (Step 4/5)**: Grade each submission item by comparing with standard solutions, identify knowledge gaps and calculation errors, generate reports and performance analysis
 
 ### Key Components
 
-- `app.py`: Main Streamlit application with 4-step workflow, sidebar navigation, and password protection
+- `app.py`: Main Streamlit application with 4-step workflow, sidebar navigation with step jumping, password protection via Streamlit secrets
 - `database/`: SQLAlchemy models and database manager
-  - `models.py`: Database models (Exam, Question, Submission, SubmissionItem, Grading, QuestionSolution, SubmissionReport, PerformanceAnalysis)
-  - `db_manager.py`: Database operations with PostgreSQL/Neon support and automatic migrations
+  - `models.py`: Database models with datetime_now_seconds() helper (Exam, Question, Submission, SubmissionItem, Grading, QuestionSolution, SubmissionReport, PerformanceAnalysis)
+  - `db_manager.py`: Database operations with PostgreSQL support, automatic migrations, LaTeX preview formatting
 - `services/`: Core business logic services
-  - `exam_analyzer.py`: OpenAI vision models for OCR and question analysis from exam images
-  - `grading_service.py`: Core grading logic with separate report building functionality
+  - `exam_analyzer.py`: OpenAI vision models for OCR and question analysis from exam images using base64 encoding
+  - `grading_service.py`: Core grading logic using GPT-5-mini for advanced grading, delegated report building
   - `grading/`: Modular grading components
     - `report_builder.py`: Dedicated report generation service
     - `statistics_calculator.py`: Statistical analysis utilities
-  - `submission_processor.py`: Process and segment student submissions using skeleton-based approach
-  - `solution_service.py`: Generate standard solutions and grading rubrics using GPT-5-mini
+  - `submission_processor.py`: Process and segment student submissions from images
+  - `solution_service.py`: Generate standard solutions with contextual analysis using GPT-5-mini
   - `performance_analyzer.py`: Advanced analysis to group common mistakes and knowledge gaps
 - `utils/`: Utility modules and configurations
-  - `config.py`: Application configuration with model settings, API keys, and PostgreSQL database URL
+  - `config.py`: Application configuration with model settings (gpt-4.1-mini for analysis, gpt-5-mini for solutions/grading), API keys, database URL, model pricing
   - `constants.py`: Centralized constants, error messages, and application defaults
   - `llm_logger.py`: LLM API call logging with cost tracking
   - `schemas.py`: JSON schemas for OpenAI API responses
-  - `data_models.py`: Data models for internal processing
+  - `data_models.py`: Data models for internal processing (GradingResult, SolutionResult)
   - `prompts.py`: Comprehensive system prompts for various AI tasks
-- `check_db.py`: PostgreSQL/Neon database connection checker
 - `delete_gradings.py`: CLI tool for clearing grading data
 
-The database supports both PostgreSQL (Neon) and SQLite with foreign key relationships. Session state management allows jumping between workflow steps and preserves user data.
+The database uses PostgreSQL with foreign key relationships and automatic migrations. Session state management allows jumping between workflow steps and preserves user data.
 
 ## Development Commands
 
@@ -87,90 +86,85 @@ streamlit run app.py
 Create a `.env` file with:
 ```
 OPENAI_API_KEY=your_openai_api_key_here
-DATABASE_URL=your_database_connection_string
-```
-
-### Database Check
-```bash
-python check_db.py
+DATABASE_URL=your_postgresql_connection_string
 ```
 
 ## Database Schema
 
-The application uses SQLAlchemy with the following key models:
-- `Exam`: Contains exam metadata and name (no original text stored)
-- `Question`: Individual exam questions with difficulty ratings, knowledge topics (JSON), order_index, and part_label
-- `QuestionSolution`: Standard solutions with reasoning approach and final answers
+The application uses SQLAlchemy with PostgreSQL and the following key models:
+- `Exam`: Contains exam metadata and name (no original text stored after migration)
+- `Question`: Individual exam questions with difficulty ratings (0=unset, updated when solution created), knowledge topics (JSON string), order_index, and part_label
+- `QuestionSolution`: Standard solutions with reasoning_approach (grading rubric) and final_answer
 - `Submission`: Student submissions linked to exams with student names and optional original_text
-- `SubmissionItem`: Segmented answers for specific questions with position tracking
-- `Grading`: AI-generated feedback with knowledge gaps analysis, calculation/logic errors, correctness assessment, and final scores
+- `SubmissionItem`: Segmented answers for specific questions with position tracking and answer_text
+- `Grading`: AI-generated feedback with knowledge_gaps and calculation_logic_errors (JSON arrays), is_correct boolean, and optional final_score
 - `SubmissionReport`: Generated markdown reports for students
-- `PerformanceAnalysis`: Grouped analysis of knowledge gaps and errors across submissions
+- `PerformanceAnalysis`: Grouped analysis with group_name, group_type (knowledge/error), description, and related_questions (JSON array)
 
-Database supports PostgreSQL (Neon) and SQLite with automatic migrations and foreign key relationships.
+Database uses PostgreSQL with automatic migrations (removes original_text from exams table) and foreign key relationships with cascade deletes.
 
 ## AI Integration
 
 - **Models**: Multiple OpenAI models configured for different tasks:
-  - `gpt-4.1-mini`: Exam analysis, submission processing, grouping analysis, and basic grading
-  - `gpt-5-mini`: Solution generation and advanced grading with reasoning
-  - Temperature set to 0.1 for consistent results
-- **API Configuration**: OpenAI client initialized per service with environment variable OPENAI_API_KEY
-- **Vision OCR**: Uses OpenAI vision models to extract text from exam and submission images with base64 encoding
-- **Question Analysis**: Parses Vietnamese exam content, extracts individual questions with difficulty (1-10 scale), knowledge topics (3-5 tags required), and hierarchical labels
-- **Solution Generation**: Creates comprehensive solutions with reasoning approaches, final answers, and difficulty assessment using context from related questions
-- **Skeleton-based Segmentation**: Matches student responses to specific questions using pre-defined question structure
-- **Advanced Grading**: Analyzes student answers against standard solutions using GPT-5-mini, identifies knowledge gaps, calculation errors, and provides Vietnamese feedback with detailed error categorization
-- **Performance Analysis**: Groups common mistakes and knowledge gaps across submissions
+  - `gpt-4.1-mini`: Exam analysis, submission processing, grouping analysis, report generation (temperature 0.1)
+  - `gpt-5-mini`: Solution generation and advanced grading (temperature 0.1 for grading)
+- **API Configuration**: OpenAI client initialized per service with OPENAI_API_KEY environment variable
+- **Vision OCR**: Uses OpenAI vision models to extract text from exam and submission images with base64 encoding and proper MIME type detection
+- **Question Analysis**: Parses Vietnamese exam content using structured JSON schema, extracts individual questions with knowledge topics (3-5 tags required), order_index, and part_label
+- **Solution Generation**: Creates comprehensive solutions using contextual analysis from related questions in same order_index, with reasoning_approach (grading rubric), final_answer, and difficulty assessment (1-10 scale for grade 9 students)
+- **Advanced Grading**: Analyzes student answers against standard solutions using GPT-5-mini with structured JSON schema, identifies knowledge gaps, calculation/logic errors, and provides correctness assessment
+- **Performance Analysis**: Groups common mistakes and knowledge gaps across submissions with database persistence
 
 ## Session State Management
 
 The Streamlit app uses extensive session state to:
-- Maintain workflow position (`current_step`)
-- Store OCR results and parsed questions
-- Track exam/submission IDs for database operations
-- Allow navigation between steps via sidebar with data selection from DB
-- Preserve editor content and segmented items
+- Maintain workflow position (`current_step`: 1, 3, 4, 5)
+- Store parsed questions and segmented items
+- Track exam/submission IDs for database operations  
+- Allow navigation between steps via sidebar with database data selection
+- Preserve grading results during CSV downloads
+- Handle password authentication (`password_correct`)
 
 ## Key Features
 
-- 4-step workflow with ability to jump between steps via sidebar navigation
-- Password protection with Streamlit secrets integration
-- Multi-image OCR support for both exams and submissions using OpenAI vision models
-- Real-time LaTeX preview with $/$$$ syntax support and interactive line clicking
-- Vietnamese language support throughout all UI and AI responses
-- Database persistence with PostgreSQL/Neon support and ability to resume work from any step
-- AI-powered question difficulty assessment (1-10 scale) and knowledge topic extraction (3-5 tags)
-- Standard solution generation with grading rubrics using context from related questions
-- Comprehensive grading with knowledge gap analysis and calculation error detection
-- Performance analysis to group common mistakes across submissions with database persistence
-- Editable segmentation results with LaTeX preview and validation
-- Modular report generation with dedicated report builder service
-- Grading results persistence in session state to prevent loss during CSV downloads
-- LLM API call logging with cost tracking
-- Database migration support and CLI tools for data management
+- 4-step workflow with sidebar navigation for step jumping (steps 1, 3, 4, 5 mapped to current_step)
+- Password protection using Streamlit secrets (ACCESS_KEY)
+- Multi-image upload support for both exams and submissions with OpenAI vision processing
+- Enhanced LaTeX display with interactive line clicking and rendered preview in expandable sections
+- Vietnamese language support throughout UI and AI responses  
+- PostgreSQL database persistence with ability to resume work from any step
+- AI-powered question analysis with knowledge topic extraction (3-5 tags validation) and difficulty assessment
+- Contextual solution generation with grading rubrics using GPT-5-mini
+- Advanced grading with knowledge gap analysis and calculation/logic error detection
+- Performance analysis grouping common mistakes with database persistence
+- Editable data tables for parsed questions and segmented submission items
+- Report generation with markdown output and download capabilities
+- Session state preservation for grading results during CSV exports
+- LLM API call logging with cost tracking and model pricing configuration
+- Database migration support and CLI utility tools
 
 ## Technical Implementation
 
 ### Data Flow
-1. **Image Processing**: Multi-image uploads → Base64 encoding → OpenAI Vision API
-2. **Question Parsing**: Vision OCR → JSON schema validation → Database storage
-3. **Solution Generation**: Question context → GPT-5-mini reasoning → Solution storage
-4. **Submission Segmentation**: Skeleton creation → Vision matching → Editable results
-5. **Grading**: Solution comparison → GPT-5-mini analysis → Detailed feedback
-6. **Reporting**: Data aggregation → Report generation → Student feedback
+1. **Image Processing**: Multi-image uploads → Temporary files → Base64 encoding → OpenAI Vision API with MIME type detection
+2. **Question Parsing**: Vision OCR → JSON schema validation → Database storage with knowledge topics validation (3-5 tags)
+3. **Solution Generation**: Contextual question analysis → GPT-5-mini with structured schema → Database storage with difficulty update
+4. **Submission Segmentation**: Image processing → Question matching → Editable dataframes → Database storage
+5. **Grading**: Solution comparison → GPT-5-mini structured analysis → Session state preservation → Optional database save
+6. **Reporting**: Grading data aggregation → Report generation → Markdown output with download
 
 ### Error Handling
-- JSON schema validation for all AI responses
-- Graceful fallbacks for API failures
-- Data validation with type conversion
-- Database transaction safety
+- Structured JSON schema validation for all AI responses
+- Try-catch blocks with fallback responses for API failures
+- Data type conversion and validation with pandas DataFrames
+- Database transaction safety with session management and automatic rollbacks
+- Temporary file cleanup after image processing
 
 ### Performance Considerations
-- Efficient database queries with joins and indexing
-- PostgreSQL/Neon cloud database support for scalability
-- Session state management for large datasets
-- Streaming responses for long-running operations
-- Cost-optimized model selection per task
-- Direct OpenAI client usage with consistent temperature handling
-- Modular service architecture for better maintainability
+- PostgreSQL database with foreign key relationships and cascade deletes
+- Session state management for large datasets and step navigation
+- Efficient database queries with SQLAlchemy joins and filtering
+- Cost-optimized model selection (gpt-4.1-mini for analysis, gpt-5-mini for grading)
+- Temperature consistency (0.1) for reproducible results
+- Modular service architecture with clear separation of concerns
+- LLM call logging for cost tracking and debugging

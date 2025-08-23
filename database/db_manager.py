@@ -32,16 +32,15 @@ class DatabaseManager:
         
         self.engine = create_engine(DATABASE_URL)
         Base.metadata.create_all(self.engine)
-        self._run_migrations()  # run any needed schema migrations
         self.SessionLocal = sessionmaker(bind=self.engine)
 
     def get_session(self) -> Session:
         return self.SessionLocal()
 
     # --- Minimal helpers (keep API small)
-    def create_exam(self, name: str) -> int:
+    def create_exam(self, name: str, grade_level: str, exam_topic: str) -> int:
         with self.get_session() as session:
-            exam = Exam(name=name)
+            exam = Exam(name=name, grade_level=grade_level, exam_topic=exam_topic)
             session.add(exam)
             session.commit()
             return exam.id
@@ -70,32 +69,6 @@ class DatabaseManager:
             return session.query(Submission).filter(
                 Submission.id == submission_id
             ).first()
-
-    def _run_migrations(self):
-        """Run any needed database schema migrations"""
-        try:
-            with self.engine.begin() as conn:  # Use begin() for auto-commit
-                # Migration 1: Remove original_text column from exams table if it exists
-                try:
-                    # Test if column exists by trying to select it
-                    conn.execute(text("SELECT original_text FROM exams LIMIT 1"))
-                    # Column exists, drop it
-                    print("Dropping original_text column from exams table...")
-                    conn.execute(text("ALTER TABLE exams DROP COLUMN IF EXISTS original_text"))
-                    print("Migration completed: original_text column removed from exams")
-                except Exception:
-                    # Column doesn't exist, continue
-                    pass
-                
-                # Migration 2: Check if submission_reports table exists
-                try:
-                    conn.execute(text("SELECT COUNT(*) FROM submission_reports LIMIT 1"))
-                except Exception:
-                    # Table doesn't exist, but SQLAlchemy will create it automatically
-                    print("submission_reports table will be created by SQLAlchemy")
-        except Exception as e:
-            print(f"Migration warning: {e}")
-            # Continue even if migration fails (table might not exist yet)
 
     def save_submission_report(self, submission_id: int, report_content: str) -> int:
         with self.get_session() as session:

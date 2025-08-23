@@ -1,6 +1,3 @@
-# services/exam_analyzer.py
-# Service cho Bước 1: Phân tích đề thi từ hình ảnh
-
 from __future__ import annotations
 
 import os
@@ -38,10 +35,11 @@ def _get_image_mime_type(path: str) -> str:
         return "image/webp"
     return "image/jpeg"
 
-def analyze_exam_from_images(image_paths: List[str]) -> List[Dict[str, Any]]:
+def analyze_exam_from_images(image_paths: List[str], grade_level: str, exam_topic: str) -> List[Dict[str, Any]]:
     """Phân tích đề thi từ hình ảnh và trả về danh sách câu hỏi"""
     logger.info(f"=== ANALYZE EXAM FROM IMAGES START ===")
     logger.info(f"Number of images: {len(image_paths)}")
+    logger.info(f"Context: Grade Level={grade_level}, Exam Topic='{exam_topic}'")
     
     if not image_paths:
         logger.warning("No images provided")
@@ -74,6 +72,13 @@ def analyze_exam_from_images(image_paths: List[str]) -> List[Dict[str, Any]]:
     ]
     user_content.extend(image_contents)
     
+    # Format system prompt with context
+    formatted_system_prompt = ANALYZE_SYSTEM_PROMPT.replace(
+        "{grade_level}", grade_level
+    ).replace(
+        "{exam_topic}", exam_topic or "Không có"
+    )
+    
     logger.info(f"Prepared {len(image_contents)} images for analysis")
     logger.info(f"Using model: {EXAM_ANALYZER_MODEL}")
     
@@ -81,7 +86,7 @@ def analyze_exam_from_images(image_paths: List[str]) -> List[Dict[str, Any]]:
         resp = _client.chat.completions.create(
             model=EXAM_ANALYZER_MODEL,
             messages=[
-                {"role": "system", "content": ANALYZE_SYSTEM_PROMPT},
+                {"role": "system", "content": formatted_system_prompt},
                 {"role": "user", "content": user_content}
             ],
             max_completion_tokens=14000,

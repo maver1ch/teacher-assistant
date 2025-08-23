@@ -377,19 +377,35 @@ if check_password():
         with left:
             st.subheader("📤 Upload ảnh đề bài")
             exam_name = st.text_input("Tên đề bài:", placeholder="VD: Đề thi giữa kỳ I Toán 12")
+            
+            # --- NEW INPUTS ---
+            grade_level = st.selectbox(
+                "Lớp học (bắt buộc):", 
+                options=[f"Lớp {i}" for i in range(6, 13)], 
+                index=3  # Default to "Lớp 9"
+            )
+            exam_topic = st.text_input(
+                "Chủ đề chính của đề (không bắt buộc):", 
+                placeholder="VD: Hàm số và đồ thị, Phương trình lượng giác"
+            )
+            # --- END NEW INPUTS ---
+            
             uploaded_files = st.file_uploader(
                 "Chọn ảnh (có thể nhiều ảnh)", type=["png", "jpg", "jpeg"], accept_multiple_files=True
             )
 
-            if uploaded_files and exam_name and st.button("🚀 Phân tích đề bài", type="primary", key="analyze_exam"):
+            if uploaded_files and exam_name and grade_level and st.button("🚀 Phân tích đề bài", type="primary", key="analyze_exam"):
                 with st.spinner("Đang OCR và phân tích đề..."):
                     temp_paths = []
                     for f in uploaded_files:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                             tmp.write(f.getbuffer())
                             temp_paths.append(tmp.name)
+                    
+                    # Extract grade number from "Lớp X"
+                    grade_number = grade_level.split(" ")[1]
 
-                    parsed = analyze_exam_from_images(temp_paths)
+                    parsed = analyze_exam_from_images(temp_paths, grade_number, exam_topic)
 
                     for p in temp_paths:
                         os.unlink(p)
@@ -405,7 +421,8 @@ if check_password():
                     ]
                     
                     if ss.parsed_questions:
-                        exam_id = db.create_exam(exam_name)  # No OCR text stored
+                        # Update create_exam call
+                        exam_id = db.create_exam(exam_name, grade_number, exam_topic)
                         ss.exam_id = exam_id
                         st.success(f"✅ Phân tích hoàn thành: {len(ss.parsed_questions)} câu hỏi.")
                     else:
@@ -462,11 +479,6 @@ if check_password():
                     knowledge_str = str(row["Kiến thức"]).strip()
                     knowledge_topics = [t.strip() for t in knowledge_str.split("•") if t.strip()]
                     
-                    if len(knowledge_topics) < 3:
-                        validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Cần ít nhất 3 tag kiến thức")
-                    elif len(knowledge_topics) > 5:
-                        validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Tối đa 5 tag kiến thức")
-                    
                     ss.parsed_questions[i]["knowledge_topics"] = knowledge_topics[:5]  # Trim to max 5
             
             # Display validation errors if any
@@ -487,114 +499,6 @@ if check_password():
                 
                 ss.current_step = 3
                 st.rerun()
-
-
-    # ====================== STEP 3 ======================
-    elif ss.current_step == 3 and ss.exam_id:
-        st.header("Bước 2: Tạo lời giải chuẩn")
-        st.info(f"📌 Exam ID: {ss.exam_id}")
-
-        questions = db.get_questions_by_exam(ss.exam_id)
-        
-        if questions:
-            st.subheader("🧠 Tạo lời giải tự động")
-            
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                st.markdown("**Danh sách câu hỏi:**")
-                question_options = [f"Câu {q.order_index}{q.part_label if q.part_label else ''}: {q.question_text[:50]}..." for q in questions]
-                selected_idx = st.selectbox("Chọn câu hỏi để tạo lời giải:", range(len(questions)), format_func=lambda x: question_options[x])
-                
-                selected_question = questions[selected_idx]
-                
-                if st.button(f"🚀 Tạo lời giải cho câu {selected_question.order_index}{selected_question.part_label or ''}", use_container_width=True):
-                    with st.spinner("Đang tạo lời giải..."):
-                        try:
-                            solution_id = create_and_save_solution(selected_question.id)
-                            st.success(f"✅ Đã tạo lời giải (ID: {solution_id})")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Lỗi khi tạo lời giải: {str(e)}")
-            
-            with col2:
-                existing_solution = get_solution_by_question(selected_question.id)
-                if existing_solution:
-                    st.markdown(f"**Lời giải câu {existing_solution['order_index']}{existing_solution['part_label'] or ''}:**")
-                    
-                    with st.expander("🎯 Đáp án cuối"):
-                        display_math_text(existing_solution["final_answer"], max_height=150)
-                        
-                    with st.expander("📋 Barem chấm điểm"):
-                        display_math_text(existing_solution["reasoning_approach"], max_height=180)
-                        
-                    st.caption(f"Tạo lúc: {existing_solution['created_at']}")
-                else:
-                    st.info("Chưa có lời giải cho câu hỏi này.")
-            
-            st.divider()
-            
-            # Tạo lời giải cho tất cả câu hỏi
-            col_a, col_b = st.columns([1, 1])
-            with col_a:
-                if st.button("🔥 Tạo lời giải cho TẤT CẢ câu hỏi", use_container_width=True):
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    for i, q in enumerate(questions):
-                        status_text.text(f"Đang xử lý câu {q.order_index}{q.part_label or ''}...")
-                        try:
-                            create_and_save_solution(q.id)
-                            progress_bar.progress((i + 1) / len(questions))
-                        except Exception as e:
-                            st.warning(f"Lỗi câu {q.order_index}{q.part_label or ''}: {str(e)}")
-                    
-                    status_text.text("✅ Hoàn thành!")
-                    st.success(f"Đã tạo lời giải cho {len(questions)} câu hỏi.")
-            
-            with col_b:
-                if st.button("➡️ Tiếp tục Bước 3 (Upload bài làm)", use_container_width=True):
-                    ss.current_step = 4
-                    st.rerun()
-            
-            st.divider()
-            st.subheader("📊 Tổng quan lời giải đã tạo")
-            
-            # Hiển thị bảng tổng quan các solutions
-            solutions_data = []
-            for q in questions:
-                sol = get_solution_by_question(q.id)
-                if sol:
-                    solutions_data.append({
-                        "Câu": f"{sol['order_index']}{sol['part_label'] or ''}",
-                        "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
-                        "Độ khó": q.difficulty or 0,
-                        "Tạo lúc": sol['created_at'].strftime("%H:%M %d/%m") if hasattr(sol['created_at'], 'strftime') else str(sol['created_at'])
-                    })
-                else:
-                    solutions_data.append({
-                        "Câu": f"{q.order_index}{q.part_label if q.part_label else ''}",
-                        "Nội dung": q.question_text[:80] + "..." if len(q.question_text) > 80 else q.question_text,
-                        "Độ khó": q.difficulty or 0,
-                        "Tạo lúc": "-"
-                    })
-            
-            if solutions_data:
-                df_solutions = pd.DataFrame(solutions_data)
-                edited_solutions_df = st.data_editor(
-                    df_solutions, 
-                    use_container_width=True, 
-                    height=300,
-                    column_config={
-                        "Câu": st.column_config.TextColumn("Câu", disabled=False),
-                        "Nội dung": st.column_config.TextColumn("Nội dung", disabled=False, width="large"),
-                        "Độ khó": st.column_config.NumberColumn("Độ khó", disabled=False, min_value=0, max_value=10),
-                        "Tạo lúc": st.column_config.TextColumn("Tạo lúc", disabled=True)
-                    },
-                    key="edit_solutions_overview"
-                )
-        else:
-            st.warning("Không có câu hỏi nào. Vui lòng quay lại Bước 1 để phân tích đề.")
 
     # ====================== STEP 4 ======================
     elif ss.current_step == 4 and ss.exam_id:

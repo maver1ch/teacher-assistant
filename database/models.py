@@ -13,6 +13,8 @@ class Exam(Base):
     __tablename__ = "exams"
     id = Column(Integer, primary_key=True)
     name = Column(String(255), nullable=False)
+    grade_level = Column(String(16), nullable=False) # Lớp học, VD: "9", "12"
+    exam_topic = Column(String(255), nullable=True)  # Chủ đề chính, VD: "Hàm số và đồ thị"
     created_at = Column(DateTime, default=datetime_now_seconds)
 
     questions = relationship("Question", back_populates="exam", cascade="all, delete-orphan")
