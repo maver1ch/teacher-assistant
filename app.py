@@ -479,12 +479,7 @@ if check_password():
                     knowledge_str = str(row["Kiến thức"]).strip()
                     knowledge_topics = [t.strip() for t in knowledge_str.split("•") if t.strip()]
                     
-                    if len(knowledge_topics) < 3:
-                        validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Cần ít nhất 3 tag kiến thức")
-                    elif len(knowledge_topics) > 5:
-                        validation_errors.append(f"Câu {row['Bài']}{row['Ý']}: Tối đa 5 tag kiến thức")
-                    
-                    ss.parsed_questions[i]["knowledge_topics"] = knowledge_topics[:5]  # Trim to max 5
+                    ss.parsed_questions[i]["knowledge_topics"] = knowledge_topics[:3]  # Trim to max 5
             
             # Display validation errors if any
             if validation_errors:
