@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    container_name: teacher_assistant_db
+    environment:
+      POSTGRES_DB: teacher_assistant
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: gr0w1ngupun1corn!V
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: teacher_assistant_app
+    environment:
+      DATABASE_URL: postgresql://admin:gr0w1ngupun1corn!V@db:5432/teacher_assistant
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    ports:
+      - "8501:8501"
+    depends_on:
+      - db
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+
+volumes:
+  postgres_data:
