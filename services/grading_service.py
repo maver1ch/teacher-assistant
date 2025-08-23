@@ -16,7 +16,8 @@ from utils.constants import (
     GRADING_USER_PROMPT_TEMPLATE,
     SERVICE_GRADING_COMPARISON_ADVANCED,
     DEFAULT_MISSING_ANSWER,
-    ERROR_SOLUTION_NOT_FOUND
+    ERROR_SOLUTION_NOT_FOUND,
+    clean_text
 )
 
 # Database
@@ -57,9 +58,9 @@ def grade_with_solution_comparison(question_id: int, student_answer: str, diffic
 def _call_grading_ai(payload: Dict) -> Dict[str, Any]:
     """Call OpenAI GPT-5 mini with reasoning to grade with solution comparison"""
     user_content = GRADING_USER_PROMPT_TEMPLATE.format(
-        payload['final_answer'],
-        payload['reasoning_approach'],
-        payload['student_answer']
+        clean_text(payload['final_answer']),
+        clean_text(payload['reasoning_approach']),
+        clean_text(payload['student_answer'])
     )
     
     try:
@@ -129,7 +130,7 @@ def grade_submission(submission_id: int) -> List[GradingResult]:
 
             # Sử dụng solution comparison grading mới với difficulty
             question_label = f"{q.order_index}{q.part_label or ''}"
-            grading_data = grade_with_solution_comparison(q.id, a.answer_text, q.difficulty)
+            grading_data = grade_with_solution_comparison(q.id, clean_text(a.answer_text or ""), q.difficulty)
             
             results.append(
                 GradingResult(

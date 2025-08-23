@@ -650,7 +650,7 @@ if check_password():
                     cols = st.columns(min(len(submission_files), 3))
                     for i, img_file in enumerate(submission_files[:3]):
                         with cols[i]:
-                            st.image(img_file, caption=f"Ảnh {i+1}", use_container_width=True)
+                            st.image(img_file, caption=f"Ảnh {i+1}", width=None)
                     if len(submission_files) > 3:
                         st.caption(f"... và {len(submission_files) - 3} ảnh khác")
         

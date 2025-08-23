@@ -17,6 +17,7 @@ from utils.data_models import SolutionResult
 from database.db_manager import db
 from database.models import Question, QuestionSolution
 from utils.llm_logger import log_llm_call
+from utils.constants import clean_text
 
 load_dotenv()
 _client = OpenAI(api_key=os.getenv(API_KEY_ENV))
@@ -35,7 +36,7 @@ def _generate_solution_with_context(
         for q in context_questions:
             # Sử dụng f-string an toàn hơn để tạo nhãn
             label = f" {q.part_label}" if q.part_label else ""
-            context_parts.append(f"Câu {q.order_index}{label}: {q.question_text}")
+            context_parts.append(f"Câu {q.order_index}{label}: {clean_text(q.question_text)}")
         
         joined_context = "\n".join(context_parts)
         
@@ -53,8 +54,8 @@ def _generate_solution_with_context(
         f"{context_str}"
         "Dựa vào bối cảnh trên (nếu có) và nội dung câu hỏi dưới đây, "
         "hãy tạo hướng logic giải bài và phương pháp đánh giá:\n\n"
-        f"**Câu hỏi cần giải**: {target_question.question_text}\n"
-        f"**Kiến thức liên quan**: {target_question.knowledge_topics}\n\n"
+        f"**Câu hỏi cần giải**: {clean_text(target_question.question_text)}\n"
+        f"**Kiến thức liên quan**: {clean_text(target_question.knowledge_topics)}\n\n"
         "Trả về JSON với 3 trường:\n"
         "- final_answer: Kết quả cuối cùng\n"
         "- reasoning_approach: Phương pháp đánh giá (các ý logic)\n"

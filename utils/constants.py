@@ -92,3 +92,30 @@ DEFAULT_TEMPERATURE_REPORT = 0.2
 DEFAULT_MAX_KNOWLEDGE_GAPS = 3
 DEFAULT_MAX_CALCULATION_ERRORS = 3
 DEFAULT_MAX_CHARS_PER_ITEM = 25
+
+# =====================
+# Text Cleaning Functions
+# =====================
+
+def clean_text(text: str) -> str:
+    """Remove NUL characters and clean text for JSON/API processing"""
+    if not text:
+        return ""
+    return text.replace('\x00', '').replace('\0', '').strip()
+
+def clean_dict_values(data: dict) -> dict:
+    """Recursively clean all string values in a dictionary"""
+    if not isinstance(data, dict):
+        return data
+    
+    cleaned = {}
+    for key, value in data.items():
+        if isinstance(value, str):
+            cleaned[key] = clean_text(value)
+        elif isinstance(value, dict):
+            cleaned[key] = clean_dict_values(value)
+        elif isinstance(value, list):
+            cleaned[key] = [clean_text(item) if isinstance(item, str) else item for item in value]
+        else:
+            cleaned[key] = value
+    return cleaned

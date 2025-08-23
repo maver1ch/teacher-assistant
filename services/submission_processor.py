@@ -12,6 +12,7 @@ from utils.config import API_KEY_ENV, SEGMENT_MODEL, LLM_TEMPERATURE
 from utils.schemas import SEGMENT_SCHEMA
 from utils.prompts import SEGMENT_SYSTEM_PROMPT
 from utils.llm_logger import log_llm_call
+from utils.constants import clean_text
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -132,9 +133,9 @@ def segment_submission_from_images(questions: List, image_paths: List[str]) -> D
                 clean_item = {
                     "question_id": int(item["question_id"]),
                     "order_index": int(item["order_index"]),
-                    "part_label": str(item.get("part_label", "")).strip(),
+                    "part_label": clean_text(str(item.get("part_label", ""))),
                     "position": int(item["position"]),
-                    "answer_text": str(item.get("answer_text", "")).strip()
+                    "answer_text": clean_text(str(item.get("answer_text", "")))
                 }
                 valid_items.append(clean_item)
             except (ValueError, TypeError) as e:
