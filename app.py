@@ -752,16 +752,30 @@ if check_password():
                 import pandas as pd
                 df_results = pd.DataFrame(table_data)
                 
-                col_title, col_download, col_save = st.columns([2, 1, 1])
+                col_title, col_download1, col_download2, col_save = st.columns([2, 1, 1, 1])
                 with col_title:
                     st.subheader("📋 Bảng kết quả tổng hợp")
-                with col_download:
+                with col_download1:
                     csv_data = df_results.to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
                         label="⬇️ Tải CSV",
                         data=csv_data,
                         file_name=f"grading_results_{ss.submission_id}.csv",
                         mime="text/csv",
+                        use_container_width=True
+                    )
+                with col_download2:
+                    # Excel download
+                    import io
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        df_results.to_excel(writer, index=False, sheet_name='Kết quả chấm bài')
+                    excel_data = excel_buffer.getvalue()
+                    st.download_button(
+                        label="📊 Tải Excel",
+                        data=excel_data,
+                        file_name=f"grading_results_{ss.submission_id}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
                 with col_save:

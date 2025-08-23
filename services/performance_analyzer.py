@@ -39,32 +39,7 @@ if not logger.handlers:
 def analyze_submission_performance(submission_id: int) -> Dict[str, List[Dict[str, Any]]]:
     """Analyzes all grading results for a submission and groups common mistakes."""
     logger.info(f"=== PERFORMANCE ANALYSIS START === Submission ID: {submission_id}")
-    
-    # Kiểm tra xem đã có analysis lưu sẵn chưa
-    saved_analysis = db.get_performance_analysis(submission_id)
-    if saved_analysis:
-        logger.info(f"Found existing analysis in database: {len(saved_analysis)} items")
-        # Chuyển đổi format từ database về format cũ
-        knowledge_summary = []
-        error_summary = []
-        
-        for item in saved_analysis:
-            analysis_item = {
-                "group_name": item["group"],
-                "description": item["description"],
-                "related_questions": item["questions"]
-            }
-            
-            if item["type"] == "knowledge":
-                knowledge_summary.append(analysis_item)
-            elif item["type"] == "error":
-                error_summary.append(analysis_item)
-        
-        logger.info(f"Returning cached analysis: {len(knowledge_summary)} knowledge + {len(error_summary)} error groups")
-        return {"knowledge_summary": knowledge_summary, "error_summary": error_summary}
-    
-    # Nếu chưa có, thực hiện phân tích mới
-    logger.info("No cached analysis found, performing new analysis...")
+    logger.info("Performing fresh analysis from latest grading data...")
     with db.get_session() as session:
         gradings = session.query(Grading).filter(Grading.submission_id == submission_id).all()
     
@@ -163,8 +138,24 @@ def _call_performance_analysis_llm(error_data: List[Dict[str, Any]]) -> List[Dic
     logger.info(f"Calling LLM with model: {GROUPING_MODEL}")
     print(f"\n[PERFORMANCE ANALYZER] Calling LLM for analysis...")
     
+    # Tách ra 2 danh sách riêng biệt
+    knowledge_gaps_list = []
+    calculation_errors_list = []
+    
+    for item in error_data:
+        question_label = item["question_label"]
+        
+        # Thêm knowledge gaps
+        for gap in item["knowledge_gaps"]:
+            knowledge_gaps_list.append(f"Câu {question_label}: {gap}")
+        
+        # Thêm calculation errors  
+        for error in item["calculation_logic_errors"]:
+            calculation_errors_list.append(f"Câu {question_label}: {error}")
+    
     user_prompt = PERFORMANCE_ANALYSIS_USER_PROMPT_TEMPLATE.format(
-        json.dumps(error_data, ensure_ascii=False, indent=2)
+        json.dumps(knowledge_gaps_list, ensure_ascii=False, indent=2),
+        json.dumps(calculation_errors_list, ensure_ascii=False, indent=2)
     )
     
     try:

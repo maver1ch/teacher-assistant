@@ -73,9 +73,15 @@ REPORT_USER_PROMPT_TEMPLATE = """Dưới đây là dữ liệu chấm bài chi t
 
 Hãy tạo báo cáo tổng hợp theo cấu trúc trong system prompt, sử dụng performance analysis để tạo action plan hiệu quả."""
 
-PERFORMANCE_ANALYSIS_USER_PROMPT_TEMPLATE = """Dưới đây là danh sách chi tiết các lỗi từ bài làm của một học sinh. Hãy phân tích và nhóm chúng lại theo hướng dẫn.
+PERFORMANCE_ANALYSIS_USER_PROMPT_TEMPLATE = """Dưới đây là danh sách chi tiết các lỗi từ bài làm của một học sinh, được phân thành 2 loại:
 
-{}"""
+**DANH SÁCH LỖ HỔNG KIẾN THỨC:**
+{}
+
+**DANH SÁCH LỖI TÍNH TOÁN & LOGIC:**
+{}
+
+Hãy phân tích và nhóm từng loại riêng biệt theo hướng dẫn. Tạo các nhóm cho knowledge_gaps và calculation_errors tách biệt."""
 
 # =====================
 # Default Configurations
