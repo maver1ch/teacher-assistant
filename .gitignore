@@ -3,6 +3,7 @@
 **/logs/**
 **/.streamlit/
 **/.claude/
+CLAUDE.md
 
 **.env
 **.png
